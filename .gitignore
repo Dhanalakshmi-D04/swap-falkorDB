@@ -1,5 +1,8 @@
-# private working notes (not part of the submission)
+# private working notes (not part of the submission): never commit
 docs/
+/CLAUDE.md
+.claude/
+*.private.md
 
 # local state / secrets
 .env
@@ -13,3 +16,10 @@ __pycache__/
 dist/
 .next/
 *.log
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+.pytest_cache/
+.ruff_cache/
