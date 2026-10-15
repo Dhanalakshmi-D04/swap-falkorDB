@@ -1,0 +1,15 @@
+# private working notes (not part of the submission)
+docs/
+
+# local state / secrets
+.env
+.env.*
+!.env.example
+node_modules/
+venv/
+.venv/
+__pycache__/
+*.pyc
+dist/
+.next/
+*.log
