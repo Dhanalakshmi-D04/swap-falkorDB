@@ -20,6 +20,10 @@ from swap.generator import Pool
 
 BATCH = 5000
 
+# FalkorDB caps a result set at RESULTSET_SIZE rows (default 10000) and truncates silently, which
+# would drop cycles and edges on a 300-pair pool. Every connection raises the cap once.
+RESULT_SET_SIZE = 10_000_000
+
 INDEX_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX FOR (p:Pair) ON (p.id)",
     "CREATE INDEX FOR (d:Donor) ON (d.id)",
@@ -83,7 +87,21 @@ class LoadStats:
 
 def connect(cfg: Settings | None = None) -> FalkorDB:
     cfg = cfg if cfg is not None else settings()
-    return FalkorDB(host=cfg.host, port=cfg.port)
+    db = FalkorDB(host=cfg.host, port=cfg.port)
+    ensure_result_set_size(db)
+    return db
+
+
+def ensure_result_set_size(db: FalkorDB, size: int = RESULT_SET_SIZE) -> None:
+    """Raise the server-side result-set cap; a silent truncation would corrupt every count."""
+    try:
+        if int(db.config_get("RESULTSET_SIZE")) < size:
+            db.config_set("RESULTSET_SIZE", size)
+    except Exception as exc:  # surfaced loudly; never a silent truncation
+        raise RuntimeError(
+            f"could not set RESULTSET_SIZE to {size} (got {exc!r}); refusing to run with a "
+            "truncated result set"
+        ) from exc
 
 
 def drop_graph(db: FalkorDB, name: str) -> bool:
@@ -103,6 +121,7 @@ def load_pool(
 ) -> LoadStats:
     """Replace graph `name` with the pool's pairs, edges and flow network."""
     db = db if db is not None else connect(cfg)
+    ensure_result_set_size(db)
     started = perf_counter()
     drop_graph(db, name)
     graph = db.select_graph(name)
