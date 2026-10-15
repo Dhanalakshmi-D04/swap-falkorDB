@@ -17,7 +17,7 @@ Patients with a willing but incompatible donor can swap donors in cycles (`A→B
 Every cell is `mean ± sd` of patients matched, over K = 20 seeds (1000–1019), read through the FalkorDB tools. Go 2 → 3 and you match **+10.7 / +17.6 / +18.2** more patients (10.7% / 8.8% / 6.1% of the pool); 3-cycles already reach 92 / 99 / 98% of the best possible with cycles of **any** length. Reproduce with one command — see [Run it](#run-it).
 
 ## Status
-Working end-to-end build. The graph engine, the typed tool catalogue, the MCP server, the HTTP API, the single-page UI, the agent loop and `make verify` are in place; `make test` runs 87 tests green. Honest caveat: an LLM endpoint was **not** configured during the build, so the agent was exercised in its deterministic **tool mode** (see the agent section); the LLM path is covered by tests with a fake client, not by a live model. See `AI_USE.md`.
+Working end-to-end build. The graph engine, the typed tool catalogue, the MCP server, the HTTP API, the single-page UI, the agent loop and `make verify` are in place; `make test` runs 108 tests green. Honest caveat: an LLM endpoint was **not** configured during the build, so the agent was exercised in its deterministic **tool mode** (see the agent section); the LLM path is covered by tests with a fake client, not by a live model. See `AI_USE.md`.
 
 ## Graph data model
 One graph per pool (default name `pool`). Synthetic pools are generated from a seed and loaded with `swap.graph.load_pool`.
@@ -78,7 +78,7 @@ MATCH (s:S),(t:T) CALL algo.maxFlow({sourceNodes:[s],targetNodes:[t],relationshi
 ```
 MATCH (p:Pair {id: $id})<-[:CAN_GIVE]-(d:Pair) RETURN d.id ORDER BY d.id
 MATCH (p:Pair {id: $id})-[:CAN_GIVE]->(r:Pair) RETURN r.id ORDER BY r.id
-MATCH (p:Pair {id: $id}) OPTIONAL MATCH (q:Pair) WHERE q.id <> p.id WITH p, q, (q.donor_abo = 'O' OR p.patient_abo = 'AB' OR q.donor_abo = p.patient_abo) AS ok RETURN sum(CASE WHEN ok THEN 1 ELSE 0 END), sum(CASE WHEN ok THEN 0 ELSE 1 END)
+MATCH (p:Pair {id: $id}) MATCH (q:Pair) WHERE q.id <> p.id WITH p, q, (q.donor_abo = 'O' OR p.patient_abo = 'AB' OR q.donor_abo = p.patient_abo) AS ok RETURN sum(CASE WHEN ok THEN 1 ELSE 0 END), sum(CASE WHEN ok THEN 0 ELSE 1 END)
 MATCH (p:Pair {id: $id})-[:CAN_GIVE]->(q:Pair)-[:CAN_GIVE]->(p) RETURN p.id, q.id
 MATCH (p:Pair {id: $id})-[:CAN_GIVE]->(b:Pair)-[:CAN_GIVE]->(c:Pair)-[:CAN_GIVE]->(p) RETURN p.id, b.id, c.id
 ```
@@ -147,7 +147,7 @@ Prerequisites: Python 3.12+, Docker.
 make up                      # start FalkorDB on 127.0.0.1:16400 (container swap-falkordb)
 python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
-make test                    # pytest (87 tests; graph tests skip cleanly if FalkorDB is down)
+make test                    # pytest (108 tests; graph tests skip cleanly if FalkorDB is down)
 make verify                  # the numbers table above (default K=5 seeds)
 make verify SEEDS=20         # the K=20 run quoted in this README (seeds 1000-1019, ~5 min)
 
@@ -192,6 +192,9 @@ Ours is a synthetic re-implementation. The published figures below are **not our
 - `test_agent.py` — the tool-calling loop with a scripted fake OpenAI client (no network): routing, schema generation, the hallucinated-id rejection, and tool mode without env.
 - `test_verify.py` — the `make verify` aggregation helpers (mean/sd, table, checks, ties) that decide PASS/FAIL and what this README quotes.
 - `test_web.py` — the single page and its one vendored asset are served.
+- `test_edge_cases.py` — degenerate pools (n = 0..3, and a hand-built zero-edge pool) through every endpoint and tool never 500; empty traversals are `not_in_graph`, unknown ids `unknown_entity`, and oversized `/pool` input is a 4xx, not a hang.
+- `test_readme.py` — every Cypher line this README quotes is a constant in `swap/tools.py` / `swap/graph.py` verbatim, so the README cannot drift from the code, and the empty-traversal wording is pinned.
+- `test_perf.py` — the N=300 bench budgets (generate+load < 5 s, `find_cycles(3)` < 1 s, `flow_bound` < 100 ms), printing their timings (marker `perf`, still run by `make test`).
 
 ## AI-use disclosure
 See `AI_USE.md`. AI coding assistants were used throughout (research, implementation, tests, docs); the team is responsible for the graph model, the Cypher and the architecture, and every number here is reproduced by a command in this repository.

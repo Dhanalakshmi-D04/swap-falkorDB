@@ -26,7 +26,7 @@ from swap.envelope import (
     envelope,
     resolve_pair,
 )
-from swap.graph import can_give_edges, connect, ensure_result_set_size
+from swap.graph import COUNT_FLOW_EDGES, can_give_edges, connect, ensure_result_set_size
 from swap.solve import pack_cycles, unbounded_cycle_cover
 
 # --- Cypher (human-written, parameterised) --------------------------------------------------
@@ -66,8 +66,10 @@ EXPLAIN_INCOMING = "MATCH (p:Pair {id: $id})<-[:CAN_GIVE]-(d:Pair) RETURN d.id O
 EXPLAIN_OUTGOING = "MATCH (p:Pair {id: $id})-[:CAN_GIVE]->(r:Pair) RETURN r.id ORDER BY r.id"
 # Split every other pair into donor-ABO-compatible vs -incompatible with THIS patient, from the
 # stored node attributes alone (ABO compatibility: O gives to all, AB receives from all, else same).
+# A plain MATCH (not OPTIONAL) keeps this honest when the pool holds no other pair: the aggregate
+# over zero rows is 0/0, whereas OPTIONAL MATCH would count the null row as incompatible.
 EXPLAIN_ABO_SPLIT = (
-    "MATCH (p:Pair {id: $id}) OPTIONAL MATCH (q:Pair) WHERE q.id <> p.id "
+    "MATCH (p:Pair {id: $id}) MATCH (q:Pair) WHERE q.id <> p.id "
     "WITH p, q, (q.donor_abo = 'O' OR p.patient_abo = 'AB' OR q.donor_abo = p.patient_abo) AS ok "
     "RETURN sum(CASE WHEN ok THEN 1 ELSE 0 END), sum(CASE WHEN ok THEN 0 ELSE 1 END)"
 )
@@ -190,6 +192,20 @@ class SwapTools:
     def flow_bound(self) -> dict[str, Any]:
         """The `algo.maxFlow` bound over the donor/patient network, and its matched arcs."""
         timer = Timer()
+        # `algo.maxFlow` errors when the graph holds no `:F` relationship at all (an empty graph, or
+        # a pool of zero pairs, which has S and T nodes but no flow arc). That is an empty
+        # traversal, not a failure: answer `not_in_graph` with a zero bound.
+        if self.n_flow_edges() == 0:
+            timer.stop(0)
+            result = {
+                "flow_bound": 0,
+                "matched_count": 0,
+                "matched": [],
+                "description": FLOW_BOUND_CAVEAT,
+                "note": f"{EMPTY_NOTE} flow arc in this graph (no donor/patient network to match)",
+            }
+            return envelope(Outcome.NOT_IN_GRAPH, result, (), trace=build_trace("flow_bound", {}, timer))
+
         max_flow, nodes, edges, edge_flows = self.graph.query(FLOW_BOUND).result_set[0]
         matched = _flow_matched_edges(nodes, edges, edge_flows)
         timer.stop(len(edges))
@@ -360,6 +376,10 @@ class SwapTools:
 
     def n_pairs(self) -> int:
         return int(self.graph.query(COUNT_PAIRS).result_set[0][0])
+
+    def n_flow_edges(self) -> int:
+        """Count the `:F` arcs; `algo.maxFlow` needs at least one or it raises server-side."""
+        return int(self.graph.query(COUNT_FLOW_EDGES).result_set[0][0])
 
     def hard_pair_ids(self) -> list[int]:
         return [int(r[0]) for r in self.graph.query(HARD_PAIR_IDS).result_set]

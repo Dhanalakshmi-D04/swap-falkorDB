@@ -33,6 +33,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "perf: performance budgets on the bench seed; runs under `make test` (deselect with -m 'not perf')",
+]
 
 [tool.ruff]
 line-length = 100
