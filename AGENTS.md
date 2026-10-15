@@ -17,7 +17,7 @@ Ask for explicit approval before: adding/upgrading/removing dependencies beyond 
 Pre-approved Python dependencies (approved by the user for this overnight run): falkordb, numpy, scipy, fastapi, uvicorn, httpx, pydantic, mcp (official Python SDK), openai (OpenAI-compatible client), python-dotenv, pytest, networkx (tests/oracle only), ruff. Pre-approved frontend: vendor `cytoscape.min.js` (one file) into `web/vendor/`; no npm build step. Anything else: write it under "Needs approval" in docs/STATUS.md and work around it.
 
 ## Git
-- Identity for this repo is LOCAL config: user.name dhanalakshmi-D04, user.email dhanalakshmidgowda04@gmail.com. Before every commit run `git config user.name && git config user.email` and `git log -1 --format='%an <%ae>'` after. Never change global git config. Never push; there is no remote.
+- Identity for this repo is LOCAL config: user.name dhanalakshmi-D04, user.email dhanalakshmidgowda04@gmail.com. Before every commit run `git config user.name && git config user.email` and `git log -1 --format='%an <%ae>'` after. Never change global git config. The remote `origin` (Dhanalakshmi-D04/swap-falkorDB) exists, but the night agent never pushes: a human pushes after review.
 - docs/ is gitignored (private notes). README.md, AI_USE.md, AGENTS.md, src/, tests/, web/, Makefile, pyproject.toml are the public repo.
 
 ## Conventions
