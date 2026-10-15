@@ -9,6 +9,8 @@ from pathlib import Path
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 16400
 DEFAULT_GRAPH = "swap"
+#: The graph a session's tools answer over: `generate_pool`/`POST /pool` load it, everything else reads it.
+DEFAULT_ACTIVE_GRAPH = "pool"
 
 _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 

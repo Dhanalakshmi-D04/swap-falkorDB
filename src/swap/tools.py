@@ -12,6 +12,7 @@ Honest framing, in the words the results use:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from falkordb import FalkorDB, Graph
@@ -79,6 +80,17 @@ CYCLES_THROUGH_3 = (
     "RETURN p.id, b.id, c.id"
 )
 
+# Altruist chains (only in a what-if scratch graph). A donor-only :Altruist can give to one
+# patient directly (altruist -> p1) or start a two-hop path (altruist -> p1 -> p2, p1's donor
+# giving to p2). Both are produced BY FalkorDB; the packing treats each as one candidate set of
+# patients, with one chain per altruist.
+ALTRUIST_IDS = "MATCH (a:Altruist) RETURN a.id ORDER BY a.id"
+CHAIN_DIRECT = "MATCH (a:Altruist {id: $id})-[:CAN_GIVE]->(p:Pair) RETURN p.id ORDER BY p.id"
+CHAIN_TWO = (
+    "MATCH (a:Altruist {id: $id})-[:CAN_GIVE]->(p1:Pair)-[:CAN_GIVE]->(p2:Pair) "
+    "WHERE p1.id <> p2.id RETURN p1.id, p2.id ORDER BY p1.id, p2.id"
+)
+
 CYPHER: dict[str, str] = {
     "count_pairs": COUNT_PAIRS,
     "hard_pair_ids": HARD_PAIR_IDS,
@@ -91,6 +103,9 @@ CYPHER: dict[str, str] = {
     "explain_abo_split": EXPLAIN_ABO_SPLIT,
     "cycles_through_2": CYCLES_THROUGH_2,
     "cycles_through_3": CYCLES_THROUGH_3,
+    "altruist_ids": ALTRUIST_IDS,
+    "chain_direct": CHAIN_DIRECT,
+    "chain_two": CHAIN_TWO,
 }
 
 CYCLES_BY_LENGTH = {2: FIND_CYCLES_2, 3: FIND_CYCLES_3, 4: FIND_CYCLES_4}
@@ -246,23 +261,39 @@ class SwapTools:
     # -- M4 ---------------------------------------------------------------------------------
 
     def best_set(self, max_len: int = 3, priority: float | None = None) -> dict[str, Any]:
-        """Vertex-disjoint cycle packing over the graph's candidate cycles, via scipy.milp."""
+        """Vertex-disjoint packing of the graph's candidate cycles (and altruist chains)."""
         timer = Timer()
         weight = 1.0 if priority is None else float(priority)
         args = {"max_len": max_len, "priority": priority}
 
         found = self.find_cycles(max_len)
         cycles = found["result"]["cycles"]
-        n_pairs = self.n_pairs()
+        chains, chain_groups = self._chain_candidates()
         hard_ids = self.hard_pair_ids()
-        pack = pack_cycles(n_pairs, cycles, hard_ids=hard_ids, priority_weight=weight)
-        timer.stop(found["trace"]["rows"] + 1)
+        # Chains are columns len(cycles).. in the combined candidate list; shift their groups.
+        groups = [[column + len(cycles) for column in group] for group in chain_groups]
+        pack = pack_cycles(
+            cycles + chains,
+            hard_ids=hard_ids,
+            priority_weight=weight,
+            at_most_one_groups=groups,
+        )
+        timer.stop(found["trace"]["rows"] + len(chains) + 1)
 
+        chosen_cycles = [c for i, c in zip(pack.indices, pack.chosen, strict=True) if i < len(cycles)]
+        chosen_chains = [c for i, c in zip(pack.indices, pack.chosen, strict=True) if i >= len(cycles)]
         result = {
             "chosen": pack.chosen,
-            "counts": {"cycles": len(pack.chosen), "patients": pack.covered},
+            "cycles": chosen_cycles,
+            "chains": chosen_chains,
+            "counts": {
+                "cycles": len(chosen_cycles),
+                "chains": len(chosen_chains),
+                "patients": pack.covered,
+            },
             "matched": pack.covered,
             "candidate_cycles": len(cycles),
+            "candidate_chains": len(chains),
             "priority_weight": weight,
             "max_len": max_len,
             "solver": {
@@ -282,7 +313,7 @@ class SwapTools:
         timer = Timer()
         edges = can_give_edges(self.graph)
         n_pairs = self.n_pairs()
-        cover = unbounded_cycle_cover(n_pairs, edges)
+        cover = unbounded_cycle_cover(edges)
         timer.stop(len(edges))
 
         result = {
@@ -298,6 +329,32 @@ class SwapTools:
         return envelope(
             Outcome.ANSWERED_WITH_PATH, result, [[a, b] for a, b in cover.arcs], trace=trace
         )
+
+    # -- M5 ---------------------------------------------------------------------------------
+
+    def what_if(self, kind: str, args: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Re-run the tools on a modified copy of the pool, in a scratch graph, and diff them."""
+        from swap.whatif import run_what_if
+
+        return run_what_if(self, kind, dict(args or {}))
+
+    def altruist_ids(self) -> list[int]:
+        """Donor-only altruist node ids in this graph (only a what-if scratch graph has any)."""
+        return [int(row[0]) for row in self.graph.query(ALTRUIST_IDS).result_set]
+
+    def _chain_candidates(self) -> tuple[list[list[int]], list[list[int]]]:
+        """Chains from the graph's altruists as patient sets, with chain-local at-most-one groups."""
+        chains: list[list[int]] = []
+        groups: list[list[int]] = []
+        for altruist in self.altruist_ids():
+            start = len(chains)
+            for row in self.graph.query(CHAIN_DIRECT, {"id": altruist}).result_set:
+                chains.append([int(row[0])])
+            for row in self.graph.query(CHAIN_TWO, {"id": altruist}).result_set:
+                chains.append([int(row[0]), int(row[1])])
+            if len(chains) > start:
+                groups.append(list(range(start, len(chains))))
+        return chains, groups
 
     # -- graph reads the tools need ---------------------------------------------------------
 

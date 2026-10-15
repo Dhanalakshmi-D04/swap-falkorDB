@@ -81,7 +81,9 @@ class Pool(DrawnPairs):
         return [[i, j] for i, j in self.edges]
 
     def summary(self) -> dict[str, object]:
-        return {**super().summary(), "seed": self.seed, "edges": len(self.edges)}
+        # `super()` is unusable here: `@dataclass(slots=True)` rebuilds the class object, so the
+        # zero-arg `super()` cell points at the pre-slots class. Call the base explicitly.
+        return {**DrawnPairs.summary(self), "seed": self.seed, "edges": len(self.edges)}
 
 
 def can_give_abo(donor_abo: str, patient_abo: str) -> bool:

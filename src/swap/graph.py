@@ -63,6 +63,29 @@ COUNT_SINKS = "MATCH (t:T) RETURN count(t)"
 COUNT_FLOW_EDGES = "MATCH ()-[f:F]->() RETURN count(f)"
 READ_PAIR_EDGES = "MATCH (a:Pair)-[:CAN_GIVE]->(b:Pair) RETURN a.id, b.id ORDER BY a.id, b.id"
 READ_PAIR = "MATCH (p:Pair {id: $id}) RETURN p.id, p.patient_abo, p.donor_abo, p.pra, p.hard"
+READ_PAIRS = (
+    "MATCH (p:Pair) RETURN p.id, p.patient_abo, p.donor_abo, p.pra, p.hard ORDER BY p.id"
+)
+
+# Donor-only altruist nodes (the add_altruistic_donor what-if). They carry a donor ABO type and
+# CAN_GIVE edges to every ABO-compatible patient, and join the flow network as a Donor with no
+# Patient side. They are labelled `:Altruist` (never `:Pair`), so they can start a chain but never
+# appear in a cycle, in `MATCH (a:Pair)`, or in the unbounded cycle cover.
+CREATE_ALTRUIST = "CREATE (:Altruist {id: $id, donor_abo: $abo}) RETURN count(*)"
+CREATE_ALTRUIST_EDGES = (
+    "MATCH (a:Altruist {id: $id}) MATCH (p:Pair) "
+    "WHERE a.donor_abo = 'O' OR p.patient_abo = 'AB' OR a.donor_abo = p.patient_abo "
+    "CREATE (a)-[:CAN_GIVE]->(p) RETURN count(*)"
+)
+CREATE_ALTRUIST_DONOR = "CREATE (:Donor {id: $id}) RETURN count(*)"
+CREATE_ALTRUIST_SOURCE_EDGE = (
+    "MATCH (s:S),(d:Donor {id: $id}) CREATE (s)-[:F {cap: 1}]->(d) RETURN count(*)"
+)
+CREATE_ALTRUIST_FLOW_EDGES = (
+    "MATCH (a:Altruist {id: $id})-[:CAN_GIVE]->(p:Pair) "
+    "MATCH (d:Donor {id: $id}),(pt:Patient) WHERE pt.id = p.id "
+    "CREATE (d)-[:F {cap: 1}]->(pt) RETURN count(*)"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +218,43 @@ def read_pair(graph: Graph, pair_id: int) -> dict[str, Any] | None:
         "pra": float(pra),
         "hard": bool(hard),
     }
+
+
+def pool_from_graph(graph: Graph, seed: int = 0) -> Pool:
+    """Rebuild a `Pool` from the `:Pair` nodes and `CAN_GIVE` edges already in the graph.
+
+    Used by the what-if tools to make a modified copy without keeping the original `Pool` around,
+    so the copy is built from the same graph the product answers from.
+    """
+    rows = graph.query(READ_PAIRS).result_set
+    return Pool(
+        n=len(rows),
+        patient_abo=[str(r[1]) for r in rows],
+        donor_abo=[str(r[2]) for r in rows],
+        pra=[float(r[3]) for r in rows],
+        ids=[int(r[0]) for r in rows],
+        hard=[bool(r[4]) for r in rows],
+        seed=seed,
+        edges=can_give_edges(graph),
+    )
+
+
+def attach_altruist(graph: Graph, altruist_id: int, donor_abo: str) -> int:
+    """Add one donor-only `:Altruist` to an already-loaded graph and wire it into the flow network.
+
+    Returns the number of `CAN_GIVE` edges the altruist got. The node is created after `load_pool`,
+    so a scratch what-if copy can carry it without a `Pool` that models donor-only nodes.
+    """
+    args = {"id": int(altruist_id), "abo": donor_abo}
+    if _count(graph, CREATE_ALTRUIST, args) != 1:
+        raise RuntimeError(f"could not create altruist {altruist_id}")
+    created = _count(graph, CREATE_ALTRUIST_EDGES, args)
+    if _count(graph, CREATE_ALTRUIST_DONOR, args) != 1:
+        raise RuntimeError(f"could not create altruist donor node {altruist_id}")
+    _count(graph, CREATE_ALTRUIST_SOURCE_EDGE, args)
+    if _count(graph, CREATE_ALTRUIST_FLOW_EDGES, args) != created:
+        raise RuntimeError(f"altruist {altruist_id}: CAN_GIVE edges and flow edges disagree")
+    return created
 
 
 def _run(graph: Graph, statement: str, rows: Sequence[Any]) -> int:
