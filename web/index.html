@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>swap · kidney paired exchange (synthetic)</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>swap</h1>
+    <p class="sub">
+      Kidney paired-exchange decision support on a FalkorDB graph.
+      Cycles and the max-flow bound are produced <strong>by FalkorDB</strong>.
+    </p>
+  </header>
+
+  <main>
+    <section class="panel controls" aria-label="pool controls">
+      <div class="control">
+        <label for="size">Pool size <span id="size-value">120</span> pairs</label>
+        <input id="size" type="range" min="30" max="300" step="1" value="120" />
+      </div>
+      <div class="control">
+        <label for="seed">Seed</label>
+        <input id="seed" type="number" value="1" min="0" step="1" />
+      </div>
+      <div class="control">
+        <button id="generate" class="primary">Generate</button>
+      </div>
+      <div class="control">
+        <span class="label">Swap length</span>
+        <div class="segmented" role="group" aria-label="swap length">
+          <button type="button" data-len="2" class="seg">2</button>
+          <button type="button" data-len="3" class="seg active">3</button>
+        </div>
+      </div>
+      <div class="control">
+        <label class="check">
+          <input id="priority" type="checkbox" />
+          Prioritise highly sensitised (PRA 0.90)
+        </label>
+        <input id="weight" type="range" min="1" max="5" step="0.5" value="2" />
+        <span class="muted">weight <span id="weight-value">2</span></span>
+      </div>
+    </section>
+
+    <section class="metrics" aria-label="live numbers">
+      <div class="metric">
+        <span class="metric-value" id="metric-matched">–</span>
+        <span class="metric-label">patients matched</span>
+      </div>
+      <div class="metric">
+        <span class="metric-value" id="metric-cycles">–</span>
+        <span class="metric-label">cycles chosen</span>
+      </div>
+      <div class="metric">
+        <span class="metric-value" id="metric-maxlen">–</span>
+        <span class="metric-label">max cycle length</span>
+      </div>
+      <div class="metric wide">
+        <span class="metric-value" id="metric-outcome">–</span>
+        <span class="metric-label">best_set outcome</span>
+      </div>
+    </section>
+
+    <div class="row">
+      <section class="panel graph-panel" aria-label="graph view">
+        <div class="panel-head">
+          <h2>Chosen cycles</h2>
+          <span class="muted" id="graph-note">only the chosen cycles, one colour per cycle</span>
+        </div>
+        <div class="graph-body">
+          <div id="cy" class="cy"></div>
+          <aside class="unmatched">
+            <h3>Unmatched patients <span id="unmatched-count" class="muted"></span></h3>
+            <p class="muted small">Click one to ask the graph why.</p>
+            <ul id="unmatched-list"></ul>
+          </aside>
+        </div>
+      </section>
+
+      <section class="panel side" aria-label="comparison and explanation">
+        <div class="panel-head"><h2>Comparison</h2></div>
+        <table class="compare">
+          <thead>
+            <tr><th>Strategy</th><th>Patients matched</th><th>Note</th></tr>
+          </thead>
+          <tbody id="compare-body">
+            <tr><td>2-way</td><td id="cmp-2">–</td><td class="muted">cycles of length 2 only</td></tr>
+            <tr><td>up to 3</td><td id="cmp-3">–</td><td class="muted">2- and 3-cycles</td></tr>
+            <tr><td>true cycle optimum</td><td id="cmp-cover">–</td><td class="muted">cycles of any length</td></tr>
+            <tr><td>max-flow bound</td><td id="cmp-bound">–</td><td class="muted">upper bound, also allows chains; not the cycle optimum</td></tr>
+          </tbody>
+        </table>
+        <p class="muted small" id="ordering-note"></p>
+
+        <div class="panel-head"><h2>Explain a patient</h2></div>
+        <div id="explain" class="explain">
+          <p class="muted">Pick an unmatched patient, or ask for an id below.</p>
+        </div>
+        <div class="control inline">
+          <input id="ask-id" type="number" placeholder="e.g. 99999" />
+          <button id="ask" type="button">Ask</button>
+        </div>
+
+        <div class="panel-head"><h2>What-if</h2></div>
+        <div class="control inline">
+          <button id="whatif" type="button">Add one altruistic O donor</button>
+        </div>
+        <div id="whatif-out" class="explain"></div>
+      </section>
+    </div>
+
+    <section class="panel" aria-label="proof panel">
+      <div class="panel-head">
+        <h2>Proof</h2>
+        <span class="muted" id="proof-note">FalkorDB numbers vs an independent plain-Python check</span>
+      </div>
+      <div id="proof" class="proof"></div>
+    </section>
+
+    <section class="panel" aria-label="trace panel">
+      <div class="panel-head">
+        <h2>Trace</h2>
+        <span class="muted">the last tool calls (tool, args, ms, rows)</span>
+      </div>
+      <div id="trace" class="trace"></div>
+    </section>
+  </main>
+
+  <footer class="footer">Synthetic patients only. Not medical advice.</footer>
+
+  <script src="/vendor/cytoscape.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
