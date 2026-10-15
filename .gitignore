@@ -23,3 +23,5 @@ dist/
 .vscode/
 .pytest_cache/
 .ruff_cache/
+.commandcode/
+*.egg-info/

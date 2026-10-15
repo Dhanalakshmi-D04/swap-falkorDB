@@ -5,3 +5,4 @@ AI coding assistants (Anthropic Claude via Claude Code) are used throughout this
 Log of assistance (append one entry per milestone; newest last):
 
 - 2026-10-15: Research and fact-check of the event rules, the idea and the published literature; independent reference implementation used only as a cross-check oracle (not part of the product). Repo scaffold and documentation written with AI assistance. Human to verify: all claims in the README against `make verify` output.
+- 2026-10-15 (night): M0-M2 (scaffold, synthetic generator, FalkorDB graph loader) written by an AI coding agent (DeepSeek V4.1 Flash via Command Code), supervised and reviewed by Claude Code. Human to verify: generator follows Roth/Sonmez/Unver rule, `make test` passes against a local FalkorDB.

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swap"
+version = "0.1.0"
+description = "Kidney paired-exchange decision support on a FalkorDB graph (synthetic patients)"
+requires-python = ">=3.12"
+dependencies = [
+    "falkordb",
+    "numpy",
+    "scipy",
+    "fastapi",
+    "uvicorn",
+    "httpx",
+    "pydantic",
+    "mcp",
+    "openai",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "networkx",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
