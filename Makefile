@@ -2,6 +2,7 @@ PY := .venv/bin/python
 PYTEST := .venv/bin/pytest
 RUFF := .venv/bin/ruff
 PORT ?= 8000
+SEEDS ?= 5
 
 export PYTHONPATH := src
 
@@ -17,7 +18,7 @@ test:
 	$(PYTEST) -q
 
 verify:
-	$(PY) -m swap.verify
+	$(PY) -m swap.verify --seeds $(SEEDS)
 
 run:
 	$(PY) -m uvicorn swap.api:app --port $(PORT)

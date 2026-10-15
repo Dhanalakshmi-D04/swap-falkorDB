@@ -2,31 +2,196 @@
 
 **An agent that finds kidney-swap chains in a graph, shows the exact cycle behind every answer, and says "the graph does not know" when it does not.**
 
-Graph Hacks 2026 (WeMakeDevs x FalkorDB) · Track 1: Agents That Act on Connected Data · work in progress
+Graph Hacks 2026 (WeMakeDevs × FalkorDB) · Track 1: Agents That Act on Connected Data · [see the demo](#run-it)
 
-> **What this is not:** not medical advice, not a clinical tool, not trained on or connected to any real patient data. Every patient in this repository is synthetic. It illustrates decision support for a transplant coordinator.
+> **What this is not:** not medical advice, not a clinical tool, not trained on or connected to any real patient data. Every patient in this repository is synthetic. It illustrates decision support for a transplant coordinator, nothing more.
 
-## The idea in one picture (numbers filled in by `make verify`)
-Patients with a willing but incompatible donor can swap donors in cycles. Allowing 3-way swaps instead of only 2-way swaps matches more patients. Same question, two swap lengths:
+Patients with a willing but incompatible donor can swap donors in cycles (`A→B→C→A`). Allowing 3-way swaps instead of only 2-way swaps matches more patients. Same pool of synthetic pairs, two swap lengths:
 
-| pool | 2-way only | up to 3-way | any cycle length | max-flow bound (also allows chains) |
-|---|---|---|---|---|
-| _to be generated_ | | | | |
+| pool (N pairs) | 2-way only | up to 3-way | any cycle length | max-flow bound (also allows chains) |
+|---:|---:|---:|---:|---:|
+| 100 | 45.4 ± 7.5 | 56.1 ± 8.4 | 57.0 ± 8.0 | 61.6 ± 6.3 |
+| 200 | 98.1 ± 7.2 | 115.7 ± 7.3 | 115.8 ± 7.4 | 121.8 ± 7.8 |
+| 300 | 151.9 ± 12.7 | 170.2 ± 12.1 | 170.4 ± 12.1 | 178.6 ± 11.7 |
+
+Every cell is `mean ± sd` of patients matched, over K = 20 seeds (1000–1019), read through the FalkorDB tools. Go 2 → 3 and you match **+10.7 / +17.6 / +18.2** more patients (10.7% / 8.8% / 6.1% of the pool); 3-cycles already reach 92 / 99 / 98% of the best possible with cycles of **any** length. Reproduce with one command — see [Run it](#run-it).
 
 ## Status
-Early build. See `AI_USE.md` for how AI assistance is used.
+Working end-to-end build. The graph engine, the typed tool catalogue, the MCP server, the HTTP API, the single-page UI, the agent loop and `make verify` are in place; `make test` runs 87 tests green. Honest caveat: an LLM endpoint was **not** configured during the build, so the agent was exercised in its deterministic **tool mode** (see the agent section); the LLM path is covered by tests with a fake client, not by a live model. See `AI_USE.md`.
 
 ## Graph data model
-_TODO: nodes, relationships, indexes._
+One graph per pool (default name `pool`). Synthetic pools are generated from a seed and loaded with `swap.graph.load_pool`.
+
+Nodes
+- `(:Pair {id, patient_abo, donor_abo, pra, hard})` — one incompatible donor/patient pair. `id` is an integer, `patient_abo`/`donor_abo` ∈ {`O`,`A`,`B`,`AB`}, `pra` ∈ {0.05, 0.45, 0.90}, `hard` = `pra == 0.90`.
+- Flow network so `algo.maxFlow` can run: `(:S)` source, `(:Donor {id})` per pair, `(:Patient {id})` per pair, `(:T)` sink.
+- `(:Altruist {id, donor_abo})` — donor-only node, created only inside a what-if scratch graph, so it can start a chain but never appears in a cycle.
+- `(:Run)`, `(:Finding)` are reserved in the plan and not yet used.
+
+Relationships
+- `(:Pair)-[:CAN_GIVE]->(:Pair)` — "donor of the left pair can give to patient of the right pair": ABO-compatible **and** the crossmatch passes at the patient's PRA.
+- `(:S)-[:F {cap:1}]->(:Donor)`, `(:Donor)-[:F {cap:1}]->(:Patient)`, `(:Patient)-[:F {cap:1}]->(:T)` — the unit-capacity flow network; `:Altruist` nodes join as a `:Donor`.
+
+Indexes (created before any edges are loaded, `swap/graph.py`):
+
+```
+CREATE INDEX FOR (p:Pair) ON (p.id)
+CREATE INDEX FOR (d:Donor) ON (d.id)
+CREATE INDEX FOR (p:Patient) ON (p.id)
+```
+
+Node/edge loading, batched with `UNWIND` in chunks of 5000 (`swap/graph.py`):
+
+```
+UNWIND $rows AS r CREATE (:Pair {id: r[0], patient_abo: r[1], donor_abo: r[2], pra: r[3], hard: r[4]}) RETURN count(*)
+UNWIND $rows AS x MATCH (a:Pair {id: x[0]}),(b:Pair {id: x[1]}) CREATE (a)-[:CAN_GIVE]->(b) RETURN count(*)
+UNWIND $rows AS x CREATE (:Donor {id: x}) RETURN count(*)
+UNWIND $rows AS x CREATE (:Patient {id: x}) RETURN count(*)
+MATCH (s:S),(d:Donor {id: $id}) CREATE (s)-[:F {cap: 1}]->(d) RETURN count(*)
+UNWIND $rows AS x MATCH (d:Donor {id: x[0]}),(p:Patient {id: x[1]}) CREATE (d)-[:F {cap: 1}]->(p) RETURN count(*)
+UNWIND $rows AS x MATCH (p:Patient {id: x}),(t:T) CREATE (p)-[:F {cap: 1}]->(t) RETURN count(*)
+```
 
 ## The Cypher and algorithms the product depends on
-_TODO: generated from the tool layer._
+All Cypher is human-written, parameterised and lives in `src/swap/tools.py` and `src/swap/graph.py` (constants quoted verbatim below). **The model never writes Cypher** — it only chooses a tool and fills typed arguments. Entity ids are resolved against the graph before any other query runs:
+
+```
+MATCH (p:Pair {id: $id}) RETURN p.id, p.patient_abo, p.donor_abo, p.pra, p.hard
+```
+
+### Cycles — produced BY FalkorDB (`swap/tools.py`)
+```
+MATCH (a:Pair)-[:CAN_GIVE]->(b:Pair)-[:CAN_GIVE]->(a) WHERE a.id < b.id RETURN a.id, b.id ORDER BY a.id, b.id
+
+MATCH (a:Pair)-[:CAN_GIVE]->(b:Pair)-[:CAN_GIVE]->(c:Pair)-[:CAN_GIVE]->(a) WHERE a.id < b.id AND a.id < c.id RETURN a.id, b.id, c.id ORDER BY a.id, b.id, c.id
+
+MATCH (a:Pair)-[:CAN_GIVE]->(b:Pair)-[:CAN_GIVE]->(c:Pair)-[:CAN_GIVE]->(d:Pair)-[:CAN_GIVE]->(a) WHERE a.id < b.id AND a.id < c.id AND a.id < d.id AND b.id <> d.id RETURN a.id, b.id, c.id, d.id ORDER BY a.id, b.id, c.id, d.id
+```
+`a.id < b.id` (and `a.id < c.id`, …) canonicalises each directed cycle to its smallest id so it is counted once; in the 4-cycle, `b.id <> d.id` rejects the walk `a→b→c→b→a`.
+
+### The max-flow bound (`swap/tools.py`)
+```
+MATCH (s:S),(t:T) CALL algo.maxFlow({sourceNodes:[s],targetNodes:[t],relationshipTypes:['F'],capacityProperty:'cap'}) YIELD maxFlow, nodes, edges, edgeFlows RETURN maxFlow, nodes, edges, edgeFlows
+```
+
+### Explaining a pair (`swap/tools.py`)
+```
+MATCH (p:Pair {id: $id})<-[:CAN_GIVE]-(d:Pair) RETURN d.id ORDER BY d.id
+MATCH (p:Pair {id: $id})-[:CAN_GIVE]->(r:Pair) RETURN r.id ORDER BY r.id
+MATCH (p:Pair {id: $id}) OPTIONAL MATCH (q:Pair) WHERE q.id <> p.id WITH p, q, (q.donor_abo = 'O' OR p.patient_abo = 'AB' OR q.donor_abo = p.patient_abo) AS ok RETURN sum(CASE WHEN ok THEN 1 ELSE 0 END), sum(CASE WHEN ok THEN 0 ELSE 1 END)
+MATCH (p:Pair {id: $id})-[:CAN_GIVE]->(q:Pair)-[:CAN_GIVE]->(p) RETURN p.id, q.id
+MATCH (p:Pair {id: $id})-[:CAN_GIVE]->(b:Pair)-[:CAN_GIVE]->(c:Pair)-[:CAN_GIVE]->(p) RETURN p.id, b.id, c.id
+```
+The last two statements return the cycles through one pair. The split query counts, from stored attributes alone, how many other pairs are ABO-compatible vs incompatible with this patient; the gap between ABO-compatible and actually-connected donors is a crossmatch failure at this patient's PRA, not a missing fact.
+
+### What-if chains from a donor-only altruist (`swap/tools.py`, scratch graph only)
+```
+MATCH (a:Altruist) RETURN a.id ORDER BY a.id
+MATCH (a:Altruist {id: $id})-[:CAN_GIVE]->(p:Pair) RETURN p.id ORDER BY p.id
+MATCH (a:Altruist {id: $id})-[:CAN_GIVE]->(p1:Pair)-[:CAN_GIVE]->(p2:Pair) WHERE p1.id <> p2.id RETURN p1.id, p2.id ORDER BY p1.id, p2.id
+```
+
+### The solvers (outside the graph, `src/swap/solve.py`)
+FalkorDB supplies the **candidate** cycles and edges; picking the best disjoint set is an integer program the agent calls as a tool:
+- **Best set** = vertex-disjoint cycle packing maximising covered patients, `scipy.optimize.milp` (0/1 per candidate cycle, ≤1 cycle per patient).
+- **True unbounded cycle optimum** = maximum cycle cover of any length, which is an **assignment problem with self-loops** (`scipy.optimize.linear_sum_assignment`; the self-loop is "unmatched").
+
+## The tool catalogue and the four outcomes
+The catalogue is fixed and exposes six tools (plus `generate_pool` on the MCP server). Each is typed; the OpenAI tool-calling schema is generated from the typed signatures (`swap/agent.py`).
+
+| tool | arguments | what it answers |
+|---|---|---|
+| `find_cycles` | `max_len: 2\|3\|4` | cycles of length 2..max_len, as ordered pair-id lists + counts (from FalkorDB) |
+| `flow_bound` | — | the `algo.maxFlow` bound over the donor/patient network |
+| `best_set` | `max_len: 2\|3\|4`, `priority?: float` | vertex-disjoint packing of the graph's cycles, max patients; `priority>1` weights highly sensitised patients |
+| `true_cycle_optimum` | — | maximum cycle cover of any length (MILP proof panel) |
+| `explain_unmatched` | `pair_id: int` | who could give to this patient, why others cannot, and the cycles through the pair |
+| `what_if` | `kind`, `donor_abo?`, `pair_id?`, `weight?`, `max_len` | re-run the tools on a modified copy and report the delta |
+
+Every tool returns a four-outcome **envelope** `{outcome, result, path, trace:{tool, args, ms, rows}}` (`swap/envelope.py`):
+
+- `answered_with_path` — the answer plus the path (cycles/arcs) that produced it.
+- `from_memory` — reserved for dated recalls (not used by the current tools).
+- `not_in_graph` — the traversal came back empty. This means **"the graph does not know"**, never "safe".
+- `unknown_entity` — an id the caller named is not in the graph; returned before any other query runs.
+
+## How `algo.maxFlow` is used, and why it is only an upper bound
+`flow_bound` builds a unit-capacity flow network `S → donors → patients → T` and reads `algo.maxFlow` with `capacityProperty:'cap'`. Because capacities are 1 and the middle arcs are donor→patient, this maximum flow equals a **maximum bipartite matching** of donors to patients — a **relaxation** of the cycle problem that also permits **chains**, i.e. paths starting at an altruistic donor with no patient to swap. So the figure is an **upper bound that also allows chains, NOT the cycle optimum**. The true unbounded **cycle** optimum is smaller (it forbids chains); the product computes it separately as an assignment problem with self-loops (`true_cycle_optimum`). The invariant the tests pin: `2-way ≤ up-to-3 ≤ true cycle cover ≤ max-flow bound`, with equality allowed.
+
+## Architecture
+```
+            (M1) synthetic generator  ──►  (M2) loader  ──►  ┌──────────────┐
+                                                             │   FalkorDB   │  one graph per pool
+   question ─► (M10) agent loop ─► fixed tool catalogue ───► │  (:Pair,     │
+                  │  LLM picks a tool        (M3/M4/M5)     │   CAN_GIVE,  │
+                  │  or keyword router                        │   :F flow net)│
+                  ▼                                           └──────┬───────┘
+        four-outcome envelope {outcome, result, path, trace}         │
+                  │                                          human-written Cypher
+                  ├─ (M7) MCP server  `python -m swap.mcp_server`    │
+                  ├─ (M8) FastAPI app  `make run`  (POST /ask, /tools/*, /proof, /graph, /trace)
+                  └─ (M9) single-page UI (web/, Cytoscape.js vendored)
+```
+Every product answer walks the graph on the request path; the Python/networkx oracles live only in tests (`tests/oracle.py`) and one labelled plain-Python check (`src/swap/crosscheck.py`) used by `/proof` and `make verify`. `src/` never imports networkx.
+
+### The agent loop (`swap/agent.py`)
+`run_agent(question)` returns `{answer, tool_calls, rejected_ids, mode}`.
+- **LLM mode** (`mode:"llm"`): configured by `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`. The model only chooses a tool from the catalogue and fills typed arguments; tool results are the envelopes, fed back verbatim.
+- **Tool mode** (`mode:"tool"`): with no LLM configured, a deterministic keyword router answers ("cycle", "who can be matched", "explain pair N", "what if", "bound", "optimum"). This always works and is the demo's fallback.
+- **Sentence check**: after the final answer is produced, pair ids named in it (`pair 17`, `#17`, ids in lists) are collected and any id that appears in **no tool result of the run** is rejected — the answer is withheld with the offending ids listed in `rejected_ids`.
 
 ## Run it
-_TODO: `make up && make run`, live demo link, demo video link._
+Prerequisites: Python 3.12+, Docker.
+
+```bash
+make up                      # start FalkorDB on 127.0.0.1:16400 (container swap-falkordb)
+python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+
+make test                    # pytest (87 tests; graph tests skip cleanly if FalkorDB is down)
+make verify                  # the numbers table above (default K=5 seeds)
+make verify SEEDS=20         # the K=20 run quoted in this README (seeds 1000-1019, ~5 min)
+
+make run                     # FastAPI + UI at http://127.0.0.1:8000
+```
+HTTP endpoints: `POST /pool {n, seed}`, `GET /tools/find_cycles?max_len=`, `GET /tools/flow_bound`, `GET /tools/best_set?max_len=&priority=`, `GET /tools/explain/{pair_id}`, `POST /tools/what_if`, `POST /ask {question}`, `GET /proof`, `GET /graph`, `GET /trace`.
+
+MCP server over stdio (the fixed catalogue, one graph per session):
+```bash
+PYTHONPATH=src .venv/bin/python -m swap.mcp_server
+```
+
+Optional LLM endpoint (any OpenAI-compatible API). Without it, `/ask` uses tool mode:
+```bash
+cp .env.example .env     # then fill LLM_BASE_URL / LLM_API_KEY / LLM_MODEL
+```
+
+## How this compares with the literature
+Ours is a synthetic re-implementation. The published figures below are **not ours** — they are labelled for context:
+- Roth, Sönmez and Ünver, *Efficient Kidney Exchange*, AER 97(3), 2007, Table 2 (simulation means, 500 pools): at n=100 incompatible pairs, 2-way matches 49.7, up to 3-way 59.7, up to 4-way 60.35, unconstrained 60.39; the paper reports 3-cycles capture ~94% of remaining gains at n=100. Our generator follows the same ABO/PRA mix and pool rule (RSU 2007, Table 1 and §III.B), omitting their wife-husband crossmatch adjustment, so our levels differ slightly (different RNG stream and pool construction) while the shape — 2→3 is the big step, 3→4 adds under 1 patient per 100 pairs — matches.
+- Saidman et al., *Transplantation* 81:773 (2006): on a real 45-patient set, 2-way allowed 8 pairs and adding 3-way allowed 11.
 
 ## Honest limits
-Synthetic data; the 2-way vs 3-way effect is a known result (Roth, Sönmez, Ünver 2007); choosing the best set of cycles is an integer program solved by SciPy, fed by cycles that FalkorDB finds; the max-flow figure is an upper bound that also allows chains; the generator omits spouse-pair crossmatch adjustments; no clinical validation.
+- **Synthetic data only.** All patients are drawn from a seeded generator; no real or personal data is used, and this is decision support, not medical advice.
+- **Known result.** The 2-vs-3 swap effect is the finding of Roth, Sönmez and Ünver (2007); we reproduce it, we do not discover it.
+- **The best-set selection is an integer program solved outside FalkorDB.** The solver is a tool the agent calls; FalkorDB supplies the candidate cycles, the bound and the explanations.
+- **The max-flow figure is an upper bound that also allows chains**, not the cycle optimum — see above.
+- **The generator omits the spouse-pair crossmatch adjustment** of the cited source.
+- **What-if chains are deliberately short**: the altruist what-if only considers `altruist→p1` and `altruist→p1→p2` chains (one chain per donor). Longer chains are out of scope.
+- **The agent was verified in tool mode**, without a live LLM (see Status).
+- The UI was not visually verified in a browser during the build (no browser binary was available); DOM ids are cross-checked against the JavaScript, and the pages are served in tests.
+- No clinical validation of any kind.
+
+## Tests
+`make test` runs pytest over `tests/`:
+- `test_generator.py` — the pool rule, determinism, and ABO/PRA/edge-density against theory and an independent scalar re-implementation.
+- `test_graph.py` — the loader holds exactly the pool (nodes, `CAN_GIVE` edges, flow network), and rejects a partial load.
+- `test_tools.py` — every graph tool cross-checked against `tests/oracle.py` (networkx matching, `milp` packing, `linear_sum_assignment` cover): cycle counts equal, `maxFlow == bipartite matching`, the chain `2 ≤ 3 ≤ cover ≤ bound`, and the empty-traversal → `not_in_graph` semantics.
+- `test_whatif.py` — `remove_pair` equals a from-scratch recomputation; adding an altruist never lowers the count; the scratch graph never outlives the call.
+- `test_mcp.py` — the catalogue lists over the MCP SDK client and every tool answers in-process.
+- `test_api.py` — every HTTP endpoint, unknown ids as `unknown_entity` (HTTP 200), bad input as 422, the proof panel's checks agree, and `/ask` answers in tool mode.
+- `test_agent.py` — the tool-calling loop with a scripted fake OpenAI client (no network): routing, schema generation, the hallucinated-id rejection, and tool mode without env.
+- `test_verify.py` — the `make verify` aggregation helpers (mean/sd, table, checks, ties) that decide PASS/FAIL and what this README quotes.
+- `test_web.py` — the single page and its one vendored asset are served.
 
 ## AI-use disclosure
-See `AI_USE.md`.
+See `AI_USE.md`. AI coding assistants were used throughout (research, implementation, tests, docs); the team is responsible for the graph model, the Cypher and the architecture, and every number here is reproduced by a command in this repository.

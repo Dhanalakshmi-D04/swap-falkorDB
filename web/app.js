@@ -372,6 +372,51 @@ async function loadTrace() {
     `<table><thead><tr><th>tool</th><th>args</th><th>ms</th><th>rows</th><th>outcome</th></tr></thead><tbody>${html}</tbody></table>`;
 }
 
+/* ---------------------------------------------------------------- ask the agent */
+
+async function askAgent() {
+  const question = $("q").value.trim();
+  if (question === "") return;
+  const panel = $("ask-out");
+  panel.innerHTML = `<p class="muted">asking the agent...</p>`;
+  let body;
+  try {
+    body = await api("/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question }),
+    });
+  } catch (err) {
+    panel.innerHTML = `<p class="bad">Request failed: ${err.message}</p>`;
+    await loadTrace();
+    return;
+  }
+  renderAsk(body);
+  await loadTrace();
+}
+
+function renderAsk(body) {
+  const lines = [];
+  const rejected = body.rejected_ids || [];
+  lines.push(
+    `<div class="rowline"><strong>answer</strong> <span class="badge unknown">${body.mode}</span>` +
+    `${rejected.length ? ` <span class="bad">rejected ids: ${rejected.join(", ")}</span>` : ""}</div>`
+  );
+  lines.push(`<div class="rowline">${body.answer || "(no answer)"}</div>`);
+  const calls = body.tool_calls || [];
+  if (calls.length) {
+    const rows = calls
+      .map((c) => `<tr><td>${c.tool}</td><td class="args">${fmtArgs(c.args)}</td>` +
+        `<td>${c.ms} ms</td><td>${c.rows}</td><td><span class="badge unknown">${c.outcome}</span></td></tr>`)
+      .join("");
+    lines.push(
+      `<table style="margin-top:0.4rem"><thead><tr><th>tool</th><th>args</th><th>ms</th>` +
+      `<th>rows</th><th>outcome</th></tr></thead><tbody>${rows}</tbody></table>`
+    );
+  }
+  $("ask-out").innerHTML = lines.join("");
+}
+
 /* ---------------------------------------------------------------- wiring */
 
 function setLen(len) {
@@ -406,6 +451,10 @@ function wire() {
     if (event.key === "Enter") $("ask").click();
   });
   $("whatif").addEventListener("click", whatIf);
+  $("ask-agent").addEventListener("click", askAgent);
+  $("q").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") $("ask-agent").click();
+  });
 }
 
 wire();

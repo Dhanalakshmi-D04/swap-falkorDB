@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from swap import crosscheck
+from swap.agent import run_agent
 from swap.config import DEFAULT_ACTIVE_GRAPH
 from swap.generator import generate_pool as draw_pool
 from swap.graph import graph_counts, load_pool, pool_from_graph
@@ -57,6 +58,10 @@ class WhatIfRequest(BaseModel):
     pair_id: int | None = None
     weight: float | None = None
     max_len: int = Field(default=3, ge=2, le=4)
+
+
+class AskRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=500, description="a question in plain English")
 
 
 @app.post("/pool")
@@ -100,6 +105,19 @@ def what_if(request: WhatIfRequest) -> dict[str, Any]:
     args = request.model_dump(exclude_none=True)
     kind = args.pop("kind")
     return _record(_tools().what_if(kind, args))
+
+
+@app.post("/ask")
+def ask(request: AskRequest) -> dict[str, Any]:
+    """Answer a free-text question through the agent loop (tool mode when no LLM is configured).
+
+    The model only chooses a tool from the fixed catalogue and fills typed arguments; the answer
+    is rejected if it names a pair id that appears in no tool result of the run.
+    """
+    outcome = run_agent(request.question)
+    for call in outcome["tool_calls"]:
+        _traces.append(dict(call))
+    return outcome
 
 
 @app.get("/proof")

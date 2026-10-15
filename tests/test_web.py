@@ -18,6 +18,7 @@ def test_index_page_is_served() -> None:
     assert "Synthetic patients only. Not medical advice." in body
     assert "/app.js" in body
     assert "/vendor/cytoscape.min.js" in body
+    assert 'id="ask-agent"' in body and 'id="q"' in body
 
 
 def test_static_assets_are_served() -> None:

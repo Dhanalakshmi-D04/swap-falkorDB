@@ -147,3 +147,23 @@ def test_graph_view_caps_edges_for_large_pools(client: TestClient) -> None:
     covered = {patient for cycle in body["chosen"] for patient in cycle}
     assert all(edge[0] in covered and edge[1] in covered for edge in body["edges"])
     assert len(body["nodes"]) == 200
+
+
+def test_ask_answers_in_tool_mode_without_an_llm(client: TestClient) -> None:
+    _load_pool(client, n=60, seed=5)
+    before = client.get("/trace").json()["count"]
+
+    body = client.post("/ask", json={"question": "who can be matched at up to 3-way?"}).json()
+
+    assert set(body) == {"answer", "tool_calls", "rejected_ids", "mode"}
+    assert body["mode"] == "tool"  # no LLM_* env configured in the test environment
+    assert body["answer"]
+    assert body["rejected_ids"] == []
+    assert body["tool_calls"][0]["tool"] == "best_set"
+    assert set(body["tool_calls"][0]) == {"tool", "args", "ms", "rows", "outcome"}
+
+    # the agent's tool calls land in the same trace log as the direct tool endpoints
+    after = client.get("/trace").json()
+    assert after["count"] > before
+
+    assert client.post("/ask", json={"question": ""}).status_code == 422

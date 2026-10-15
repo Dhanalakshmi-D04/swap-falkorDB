@@ -112,6 +112,23 @@
       </section>
     </div>
 
+    <section class="panel" aria-label="ask the agent">
+      <div class="panel-head">
+        <h2>Ask the agent</h2>
+        <span class="muted" id="ask-mode">tool mode (no LLM configured)</span>
+      </div>
+      <div class="control inline">
+        <input id="q" type="text" style="width:340px" placeholder="e.g. who can be matched at up to 3-way?" />
+        <button id="ask-agent" class="primary" type="button">Ask</button>
+      </div>
+      <div id="ask-out" class="explain">
+        <p class="muted small">
+          The model only picks a tool and fills typed arguments; it never writes Cypher. With no
+          <code>LLM_*</code> env set, a keyword router answers instead.
+        </p>
+      </div>
+    </section>
+
     <section class="panel" aria-label="proof panel">
       <div class="panel-head">
         <h2>Proof</h2>
