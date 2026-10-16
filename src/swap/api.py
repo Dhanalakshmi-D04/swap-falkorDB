@@ -8,7 +8,11 @@ plain-Python count from the same pool. `make run` starts it (`uvicorn swap.api:a
 
 from __future__ import annotations
 
+import logging
+import os
 from collections import deque
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
@@ -20,18 +24,57 @@ from swap import crosscheck
 from swap.agent import run_agent
 from swap.config import DEFAULT_ACTIVE_GRAPH
 from swap.generator import generate_pool as draw_pool
-from swap.graph import graph_counts, load_pool, pool_from_graph
+from swap.graph import connect, graph_counts, load_pool, pool_from_graph
 from swap.tools import SwapTools
 
 ACTIVE_GRAPH = DEFAULT_ACTIVE_GRAPH
 TRACE_LIMIT = 200
 EDGE_CAP = 1500
-WEB_DIR = Path(__file__).resolve().parents[2] / "web"
+#: Default pool loaded at startup when the active graph is missing, so a fresh visitor sees data.
+DEFAULT_POOL_N = 200
+DEFAULT_POOL_SEED = 1000
+#: Overridable so a container can point at a web/ copied outside the installed package.
+WEB_DIR = Path(os.environ.get("WEB_DIR") or (Path(__file__).resolve().parents[2] / "web"))
+
+log = logging.getLogger("swap.api")
+
+
+def ensure_default_pool(
+    graph_name: str = ACTIVE_GRAPH,
+    n: int = DEFAULT_POOL_N,
+    seed: int = DEFAULT_POOL_SEED,
+    *,
+    db: Any | None = None,
+) -> dict[str, Any]:
+    """Load the default pool into `graph_name` unless that graph already exists in FalkorDB.
+
+    Runs at startup so a fresh visitor (and `GET /proof` before any `POST /pool`) sees data; an
+    explicit `POST /pool` still replaces it on demand through the UI Generate button.
+    """
+    db = db if db is not None else connect()
+    if graph_name in db.list_graphs():
+        return {"graph": graph_name, "loaded": False, "reason": "graph already exists"}
+    pool = draw_pool(n, seed)
+    stats = load_pool(pool, graph_name, db=db)
+    return {"graph": graph_name, "loaded": True, "summary": pool.summary(), "load": stats.summary()}
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    # Never let a graph hiccup take the HTTP server down: without data the endpoints simply report
+    # the empty/graphless outcomes until a pool is loaded.
+    try:
+        log.info("startup default pool: %s", ensure_default_pool())
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover - depends on a live FalkorDB
+        log.warning("could not prepare the default pool at startup: %r", exc)
+    yield
+
 
 app = FastAPI(
     title="swap",
     version="0.1.0",
     description="Kidney paired-exchange decision support on FalkorDB (synthetic patients only)",
+    lifespan=lifespan,
 )
 
 _traces: deque[dict[str, Any]] = deque(maxlen=TRACE_LIMIT)

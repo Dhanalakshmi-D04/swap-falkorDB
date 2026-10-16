@@ -16,8 +16,18 @@ Patients with a willing but incompatible donor can swap donors in cycles (`A→B
 
 Every cell is `mean ± sd` of patients matched, over K = 20 seeds (1000–1019), read through the FalkorDB tools. Go 2 → 3 and you match **+10.7 / +17.6 / +18.2** more patients (10.7% / 8.8% / 6.1% of the pool); 3-cycles already reach 92 / 99 / 98% of the best possible with cycles of **any** length. Reproduce with one command — see [Run it](#run-it).
 
+## Priority weighting
+`best_set(max_len=3, priority>1)` counts each patient with PRA 0.90 `priority` times, so the cycle packing prefers covering highly sensitised patients. Measured through the FalkorDB tools, N = 200 pairs over K = 20 seeds (1000–1019), priority weight 1 vs 3 (`make verify-fairness FAIRNESS_SEEDS=20`):
+
+| priority weight | highly sensitised (PRA 0.90) matched | all patients matched |
+|---:|---:|---:|
+| 1 (off) | 76.5% ± 7.7 | 115.7 ± 7.3 |
+| 3 | 96.8% ± 3.0 | 114.7 ± 7.1 |
+
+Weighting lifted the highly sensitised share by **+20.3 ± 7.1** percentage points, and it improved that share on **20/20 seeds** (no ties, no seed worse). The cost is small but real: mean total matched fell by **1.0** patient (lower on 9/20 seeds, higher on none). The effect is **reproduced**, not assumed — the raw per-seed output is in the command above.
+
 ## Status
-Working end-to-end build. The graph engine, the typed tool catalogue, the MCP server, the HTTP API, the single-page UI, the agent loop and `make verify` are in place; `make test` runs 108 tests green. Honest caveat: an LLM endpoint was **not** configured during the build, so the agent was exercised in its deterministic **tool mode** (see the agent section); the LLM path is covered by tests with a fake client, not by a live model. See `AI_USE.md`.
+Working end-to-end build. The graph engine, the typed tool catalogue, the MCP server, the HTTP API, the single-page UI, the agent loop, `make verify` and `make verify-fairness` are in place; `make test` runs 109 tests green. Honest caveat: an LLM endpoint was **not** configured during the build, so the agent was exercised in its deterministic **tool mode** (see the agent section); the LLM path is covered by tests with a fake client, not by a live model. See `AI_USE.md`.
 
 ## Graph data model
 One graph per pool (default name `pool`). Synthetic pools are generated from a seed and loaded with `swap.graph.load_pool`.
@@ -141,15 +151,30 @@ Every product answer walks the graph on the request path; the Python/networkx or
 - **Sentence check**: after the final answer is produced, pair ids named in it (`pair 17`, `#17`, ids in lists) are collected and any id that appears in **no tool result of the run** is rejected — the answer is withheld with the offending ids listed in `rejected_ids`.
 
 ## Run it
-Prerequisites: Python 3.12+, Docker.
+Prerequisites: Python 3.12+ and Docker.
+
+**Live demo:** _TODO — the human adds the deployed URL here before submission._
+
+The whole stack in two containers (the app plus its own FalkorDB; only the app is published):
+
+```bash
+APP_PORT=8010 docker compose up -d --build  # app on http://127.0.0.1:8010; FalkorDB stays internal
+curl -X POST localhost:8010/pool -H 'content-type: application/json' -d '{"n":120,"seed":7}'
+curl localhost:8010/proof                    # the numbers above + the independent cross-check
+docker compose down -v                        # stop the stack and drop its volume
+```
+`make docker-up` / `make docker-down` wrap the first and last commands. `APP_PORT` sets the host port (default `80`; the container always listens on `8000`). Compose builds `python:3.12-slim`, installs the project from `pyproject.toml` and serves `web/`, so no local Python is needed. At startup the app loads a default pool (N=200, seed 1000) when the active graph is missing, so `/` and `/proof` show data immediately; the UI **Generate** button still loads any `{n, seed}` you pick.
+
+Local development against FalkorDB on the host (port 16400):
 
 ```bash
 make up                      # start FalkorDB on 127.0.0.1:16400 (container swap-falkordb)
 python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
-make test                    # pytest (108 tests; graph tests skip cleanly if FalkorDB is down)
+make test                    # pytest (109 tests; graph tests skip cleanly if FalkorDB is down)
 make verify                  # the numbers table above (default K=5 seeds)
 make verify SEEDS=20         # the K=20 run quoted in this README (seeds 1000-1019, ~5 min)
+make verify-fairness         # priority weighting (weight 1 vs 3) on highly sensitised patients
 
 make run                     # FastAPI + UI at http://127.0.0.1:8000
 ```

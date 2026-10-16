@@ -10,10 +10,10 @@ import pytest
 from fastapi.testclient import TestClient
 from redis.exceptions import RedisError
 
-from swap.api import app
+from swap.api import DEFAULT_POOL_N, DEFAULT_POOL_SEED, app, ensure_default_pool
 from swap.config import settings
 from swap.envelope import Outcome
-from swap.graph import connect
+from swap.graph import connect, drop_graph
 
 VALID = {outcome.value for outcome in Outcome}
 ENVELOPE_KEYS = {"outcome", "result", "path", "trace"}
@@ -167,3 +167,27 @@ def test_ask_answers_in_tool_mode_without_an_llm(client: TestClient) -> None:
     assert after["count"] > before
 
     assert client.post("/ask", json={"question": ""}).status_code == 422
+
+
+def test_startup_loads_a_default_pool_when_the_graph_is_missing() -> None:
+    """A fresh process: the startup default loads n=200/seed 1000, once, and never overwrites."""
+    cfg = settings()
+    try:
+        db = connect(cfg)
+        db.list_graphs()
+    except RedisError as exc:
+        pytest.skip(f"FalkorDB unreachable at {cfg.where()} ({exc}); start it with `make up`")
+
+    name = "default_pool_startup_test"
+    drop_graph(db, name)  # guarantee the "graph does not exist yet" precondition
+    try:
+        first = ensure_default_pool(name, db=db)
+        assert first["loaded"] is True
+        assert first["summary"]["n"] == DEFAULT_POOL_N
+        assert first["summary"]["seed"] == DEFAULT_POOL_SEED
+
+        second = ensure_default_pool(name, db=db)
+        assert second["loaded"] is False
+        assert second["reason"] == "graph already exists"
+    finally:
+        drop_graph(db, name)

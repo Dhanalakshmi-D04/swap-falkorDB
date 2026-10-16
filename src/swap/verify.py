@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -24,6 +25,12 @@ from swap.tools import SwapTools
 SIZES: tuple[int, ...] = (100, 200, 300)
 SEED_START = 1000
 DEFAULT_SEEDS = 5
+
+#: Priority-weighting measurement: N pairs, best_set max_len, comparison weight, default K.
+FAIRNESS_N = 200
+FAIRNESS_MAX_LEN = 3
+FAIRNESS_WEIGHT = 3.0
+DEFAULT_FAIRNESS_SEEDS = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +169,126 @@ def _seeds(rows: list[Row], limit: int = 8) -> str:
     return shown if len(rows) <= limit else f"{shown}, … (+{len(rows) - limit} more)"
 
 
+@dataclass(frozen=True, slots=True)
+class FairRow:
+    """One seed's priority-weighting comparison on a fixed pool (`w1` vs a higher weight)."""
+
+    seed: int
+    hard_total: int
+    hard_w1: int
+    hard_w3: int
+    total_w1: int
+    total_w3: int
+
+    def share(self, hard_matched: int) -> float:
+        return 100.0 * hard_matched / self.hard_total if self.hard_total else 0.0
+
+    @property
+    def share_w1(self) -> float:
+        return self.share(self.hard_w1)
+
+    @property
+    def share_w3(self) -> float:
+        return self.share(self.hard_w3)
+
+
+def _matched_patients(best_set_env: dict[str, Any]) -> set[int]:
+    """The patient ids covered by a `best_set` envelope's chosen cycles."""
+    return {patient for cycle in best_set_env["result"]["chosen"] for patient in cycle}
+
+
+def measure_fairness(pool: Pool, name: str, db: object, weight: float = FAIRNESS_WEIGHT) -> FairRow:
+    """Load a pool and compare `best_set` at priority weight 1 vs `weight` on PRA 0.90 patients."""
+    load_pool(pool, name, db=db)
+    try:
+        tools = SwapTools(name, db=db)
+        hard_ids = set(tools.hard_pair_ids())
+        matched_w1 = _matched_patients(tools.best_set(FAIRNESS_MAX_LEN, 1.0))
+        matched_w3 = _matched_patients(tools.best_set(FAIRNESS_MAX_LEN, weight))
+    finally:
+        drop_graph(db, name)
+    return FairRow(
+        seed=pool.seed,
+        hard_total=len(hard_ids),
+        hard_w1=len(hard_ids & matched_w1),
+        hard_w3=len(hard_ids & matched_w3),
+        total_w1=len(matched_w1),
+        total_w3=len(matched_w3),
+    )
+
+
+def _fair_seeds(rows: list[FairRow], limit: int = 8) -> str:
+    shown = ", ".join(str(row.seed) for row in rows[:limit])
+    return shown if len(rows) <= limit else f"{shown}, … (+{len(rows) - limit} more)"
+
+
+def run_fairness(
+    seeds: int,
+    n: int = FAIRNESS_N,
+    seed_start: int = SEED_START,
+    weight: float = FAIRNESS_WEIGHT,
+) -> int:
+    """Measure whether priority weighting lifts the highly sensitised share, and its cost."""
+    seed_list = list(range(seed_start, seed_start + seeds))
+    cfg = settings()
+    db = connect(cfg)
+    db.list_graphs()  # fail fast (and loudly) if FalkorDB is not reachable
+
+    print("# swap verify --fairness\n")
+    print(
+        f"Command: `python -m swap.verify --fairness --seeds {seeds}`  ·  FalkorDB at {cfg.where()}"
+    )
+    print(
+        f"N={n} pairs  ·  seeds {seed_list[0]}..{seed_list[-1]} (K={seeds})  ·  "
+        f"best_set(max_len={FAIRNESS_MAX_LEN})  ·  highly sensitised = PRA 0.90  ·  "
+        f"priority weight 1 vs {weight:g}\n"
+    )
+    rows = [
+        measure_fairness(generate_pool(n, seed), f"fair_{n}_{seed}", db, weight)
+        for seed in seed_list
+    ]
+
+    w1_share_m, w1_share_s = _mean_sd([r.share_w1 for r in rows])
+    w3_share_m, w3_share_s = _mean_sd([r.share_w3 for r in rows])
+    d_m, d_s = _mean_sd([r.share_w3 - r.share_w1 for r in rows])
+    w1_total_m, w1_total_s = _mean_sd([r.total_w1 for r in rows])
+    w3_total_m, w3_total_s = _mean_sd([r.total_w3 for r in rows])
+
+    print("## Share of highly sensitised (PRA 0.90) patients matched\n")
+    print(f"| K | max_len | weight 1 | weight {weight:g} | mean Δ (percentage points) |")
+    print("|--:|--:|--:|--:|--:|")
+    print(
+        f"| {len(rows)} | {FAIRNESS_MAX_LEN} | {w1_share_m:.1f}% ± {w1_share_s:.1f} "
+        f"| {w3_share_m:.1f}% ± {w3_share_s:.1f} | {d_m:+.1f} ± {d_s:.1f} |"
+    )
+
+    print("\n## Total patients matched (all patients, same pools)\n")
+    print(f"| K | weight 1 | weight {weight:g} | mean Δ |")
+    print("|--:|--:|--:|--:|")
+    print(
+        f"| {len(rows)} | {w1_total_m:.1f} ± {w1_total_s:.1f} "
+        f"| {w3_total_m:.1f} ± {w3_total_s:.1f} | {w3_total_m - w1_total_m:+.1f} |"
+    )
+
+    improved = [r for r in rows if r.hard_w3 > r.hard_w1]
+    tied = [r for r in rows if r.hard_w3 == r.hard_w1]
+    lower = [r for r in rows if r.hard_w3 < r.hard_w1]
+    total_down = [r for r in rows if r.total_w3 < r.total_w1]
+    total_up = [r for r in rows if r.total_w3 > r.total_w1]
+    print("\n## Per-seed negatives and ties (reported honestly)\n")
+    print(
+        f"- highly sensitised matched: improved {len(improved)} of {len(rows)}, tied {len(tied)}, "
+        f"lower {len(lower)}" + (f" (seeds {_fair_seeds(lower)})" if lower else "")
+    )
+    print(
+        f"- total matched: lower under weight {weight:g} on {len(total_down)} of {len(rows)}, "
+        f"higher on {len(total_up)}"
+        + (f" (lower: seeds {_fair_seeds(total_down)})" if total_down else "")
+    )
+    print()
+    return 0
+
+
 def run(seeds: int, sizes: tuple[int, ...] = SIZES, seed_start: int = SEED_START) -> int:
     """Print the reproducible table and checks; return a process exit code (0 on all-pass)."""
     seed_list = list(range(seed_start, seed_start + seeds))
@@ -202,10 +329,20 @@ def run(seeds: int, sizes: tuple[int, ...] = SIZES, seed_start: int = SEED_START
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m swap.verify")
     parser.add_argument(
-        "--seeds", type=int, default=DEFAULT_SEEDS, help="number of seeds (default 5; README uses 20)"
+        "--seeds",
+        type=int,
+        default=None,
+        help="number of seeds (default 5; 10 for --fairness; README's numbers table uses 20)",
+    )
+    parser.add_argument(
+        "--fairness",
+        action="store_true",
+        help="measure priority weighting on highly sensitised patients instead of the numbers table",
     )
     args = parser.parse_args(argv)
-    return run(args.seeds)
+    if args.fairness:
+        return run_fairness(args.seeds if args.seeds is not None else DEFAULT_FAIRNESS_SEEDS)
+    return run(args.seeds if args.seeds is not None else DEFAULT_SEEDS)
 
 
 if __name__ == "__main__":
