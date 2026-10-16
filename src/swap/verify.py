@@ -152,7 +152,7 @@ def _negatives(rows_by_n: dict[int, list[Row]]) -> list[str]:
     if len(three_is_optimal) > 0:
         lines.append(
             "- note: up-to-3 reaching the cover means longer cycles bought nothing on those pools; "
-            "the 3-to-4 step is expected to be under 1 patient per 100 pairs (docs/EVIDENCE.md)."
+            "the 3-to-4 step is expected to be under 1 patient per 100 pairs (Roth, Sönmez, Ünver 2007; not measured here)."
         )
     return lines
 
