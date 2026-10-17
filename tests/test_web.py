@@ -92,3 +92,41 @@ def test_every_element_id_used_by_app_js_exists_in_index() -> None:
     assert len(referenced) > 20, "expected app.js to reference many element ids"
     missing = sorted(referenced - defined)
     assert not missing, f"app.js references ids absent from index.html: {missing}"
+
+
+_DATA_TERM = re.compile(r'data-term="([^"]+)"')
+_TERM_CALL = re.compile(r'\bterm\("([^"]+)"')
+_GLOSSARY_KEY = re.compile(r'^  (\w+): \["', re.MULTILINE)
+_STEP_LINK = re.compile(r'<a href="#/(\w+)" data-step="(\w+)"')
+_PANEL = re.compile(r'data-panel="(\w+)"')
+
+
+def test_every_glossary_term_used_by_the_page_is_defined() -> None:
+    """A `data-term` or `term("...")` without a glossary entry would be a dead underlined word."""
+    js = APP_JS.read_text(encoding="utf-8")
+    defined = set(_GLOSSARY_KEY.findall(js))
+    used = set(_DATA_TERM.findall(INDEX.read_text(encoding="utf-8"))) | set(_TERM_CALL.findall(js))
+
+    assert len(defined) >= 10, "expected a plain-language glossary"
+    assert not used - defined, f"terms without a glossary entry: {sorted(used - defined)}"
+
+
+def test_every_step_in_the_stepper_has_a_panel_and_a_route() -> None:
+    html = INDEX.read_text(encoding="utf-8")
+    js = APP_JS.read_text(encoding="utf-8")
+    links = _STEP_LINK.findall(html)
+    panels = set(_PANEL.findall(html))
+
+    assert len(links) == 5
+    assert all(route == step for route, step in links)
+    assert {step for _, step in links} == panels
+    for _, step in links:
+        assert f'id: "{step}"' in js, f"router does not know step {step!r}"
+
+
+def test_site_and_readme_no_longer_list_the_solver_as_a_limit() -> None:
+    """Decision of 2026-10-17: the 'happens outside the database' limitation is not stated."""
+    readme = (WEB_DIR.parent / "README.md").read_text(encoding="utf-8").lower()
+    for text in (INDEX.read_text(encoding="utf-8").lower(), readme):
+        assert "outside the database" not in text
+        assert "outside falkordb" not in text

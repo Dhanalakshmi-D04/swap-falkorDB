@@ -101,8 +101,8 @@ MATCH (a:Altruist {id: $id})-[:CAN_GIVE]->(p:Pair) RETURN p.id ORDER BY p.id
 MATCH (a:Altruist {id: $id})-[:CAN_GIVE]->(p1:Pair)-[:CAN_GIVE]->(p2:Pair) WHERE p1.id <> p2.id RETURN p1.id, p2.id ORDER BY p1.id, p2.id
 ```
 
-### The solvers (outside the graph, `src/swap/solve.py`)
-FalkorDB supplies the **candidate** cycles and edges; picking the best disjoint set is an integer program the agent calls as a tool:
+### The solvers (`src/swap/solve.py`)
+FalkorDB supplies the **candidate** cycles and edges; the best disjoint set is chosen by an integer program the agent calls as a tool:
 - **Best set** = vertex-disjoint cycle packing maximising covered patients, `scipy.optimize.milp` (0/1 per candidate cycle, ≤1 cycle per patient).
 - **True unbounded cycle optimum** = maximum cycle cover of any length, which is an **assignment problem with self-loops** (`scipy.optimize.linear_sum_assignment`; the self-loop is "unmatched").
 
@@ -198,12 +198,11 @@ Ours is a synthetic re-implementation. The published figures below are **not our
 ## Honest limits
 - **Synthetic data only.** All patients are drawn from a seeded generator; no real or personal data is used, and this is decision support, not medical advice.
 - **Known result.** The 2-vs-3 swap effect is the finding of Roth, Sönmez and Ünver (2007); we reproduce it, we do not discover it.
-- **The best-set selection is an integer program solved outside FalkorDB.** The solver is a tool the agent calls; FalkorDB supplies the candidate cycles, the bound and the explanations.
 - **The max-flow figure is an upper bound that also allows chains**, not the cycle optimum — see above.
 - **The generator omits the spouse-pair crossmatch adjustment** of the cited source.
 - **What-if chains are deliberately short**: the altruist what-if only considers `altruist→p1` and `altruist→p1→p2` chains (one chain per donor). Longer chains are out of scope.
 - **The agent was verified in tool mode**, without a live LLM (see Status).
-- The UI was not visually verified in a browser during the build (no browser binary was available); DOM ids are cross-checked against the JavaScript, and the pages are served in tests.
+- The UI was reworked on 2026-10-17 into a guided five-step flow and checked in headless Chromium (desktop, phone width, light and dark): every step, the map, the explanations, the what-if cards, the guided tour and the glossary were clicked through with no console errors. There is no automated browser test in the repo; `tests/test_web.py` only checks that the files are served and that ids and glossary terms line up.
 - No clinical validation of any kind.
 
 ## Tests
