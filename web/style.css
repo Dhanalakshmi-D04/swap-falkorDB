@@ -156,6 +156,11 @@ main:focus, main:focus-visible { outline: none; }
 .btn-sm { padding: 0.3rem 0.65rem; font-size: 0.86rem; }
 .btn-lg { padding: 0.8rem 1.4rem; font-size: 1.05rem; }
 .btn[disabled] { opacity: 0.4; cursor: default; pointer-events: none; }
+.btn.is-busy { opacity: 1; cursor: progress; }
+.btn.is-busy::before {
+  content: ""; display: inline-block; width: 0.9em; height: 0.9em; margin-right: 0.55rem; vertical-align: -0.1em;
+  border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite;
+}
 .btn-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
 
 /* ------------------------------------------------------------------------ layout */
@@ -296,6 +301,8 @@ q { quotes: "“" "”"; font-style: italic; }
 .detail h3 { font-size: 1.5rem; }
 .detail h4 { margin-top: 1rem; font: 700 0.74rem var(--sans); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
 
+.map-wrap { position: relative; }
+.map-overlay { position: absolute; z-index: 2; top: 1.4rem; left: 50%; transform: translateX(-50%); width: min(430px, 94%); box-shadow: 5px 5px 0 var(--line-strong); }
 .map {
   display: grid; grid-template-columns: repeat(auto-fill, 22px); gap: 10px 9px; justify-content: space-between;
   padding: 0.3rem 0 1rem; min-height: 9rem; transition: opacity 0.2s;
@@ -334,6 +341,27 @@ q { quotes: "“" "”"; font-style: italic; }
 .status { color: var(--muted); font-size: 0.9rem; padding: 0.3rem 0; margin: 0; }
 .status-bad { color: var(--bad); font-weight: 600; }
 .status-muted { color: var(--muted); }
+
+/* ---------------------------------------------------------------- loading states */
+
+.spinner {
+  display: inline-block; flex: none; width: 24px; height: 24px; border-radius: 50%;
+  border: 3px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.8s linear infinite;
+}
+.spinner-sm { width: 14px; height: 14px; border-width: 2px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading {
+  display: flex; gap: 0.9rem; align-items: flex-start; padding: 1rem 1.1rem;
+  background: var(--surface); border: 1px solid var(--line-strong); border-left: 4px solid var(--accent); border-radius: var(--radius);
+}
+.loading-body { flex: 1; min-width: 0; }
+.loading-text { margin: 0; font-weight: 650; }
+.loading-sec { color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+.loading-hint { margin: 0.2rem 0 0; color: var(--muted); font-size: 0.86rem; }
+.loading-bar { display: block; position: relative; height: 3px; margin-top: 0.8rem; background: var(--paper-2); overflow: hidden; }
+.loading-bar::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 35%; background: var(--accent); animation: slide 1.2s ease-in-out infinite; }
+@keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+.status-loading { display: inline-flex; align-items: center; gap: 0.55rem; color: var(--ink-2); font-weight: 600; }
 
 /* ------------------------------------------------------------------- folds */
 
@@ -579,5 +607,7 @@ table.grid td.args { max-width: 320px; overflow: hidden; text-overflow: ellipsis
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
+  .loading-bar::after { animation: none; width: 100%; opacity: 0.35; }
+  .spinner, .btn.is-busy::before { animation: none; }
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
 }

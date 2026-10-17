@@ -39,18 +39,61 @@ function setStatus(node, text, tone) {
   if (!node) return;
   clear(node);
   node.hidden = !text;
-  if (text) node.append(el("span", { class: tone ? `status-${tone}` : "", text }));
+  if (!text) return;
+  if (tone === "loading") node.append(el("span", { class: "status-loading" }, el("span", { class: "spinner spinner-sm", "aria-hidden": "true" }), text));
+  else node.append(el("span", { class: tone ? `status-${tone}` : "", text }));
+}
+
+/* A visible "working on it" state: spinner, sliding bar and a running seconds counter. */
+function loadingBlock(text, hint) {
+  const seconds = el("span", { class: "loading-sec" });
+  const block = el("div", { class: "loading", role: "status" },
+    el("span", { class: "spinner", "aria-hidden": "true" }),
+    el("div", { class: "loading-body" },
+      el("p", { class: "loading-text" }, text, seconds),
+      hint ? el("p", { class: "loading-hint", text: hint }) : null,
+      el("span", { class: "loading-bar", "aria-hidden": "true" })));
+  const started = performance.now();
+  const timer = setInterval(() => {
+    if (!block.isConnected) { clearInterval(timer); return; }
+    const secs = Math.floor((performance.now() - started) / 1000);
+    seconds.textContent = secs >= 1 ? ` · ${secs}s` : "";
+    if (secs === 25) block.querySelector(".loading-body").insertBefore(el("p", { class: "loading-hint", text: "Still working. Bigger pools take longer." }), block.querySelector(".loading-bar"));
+  }, 500);
+  return block;
+}
+
+/* Disable a button and show a spinner on it while `task` runs. */
+async function withBusy(button, busyLabel, task) {
+  const label = button.textContent;
+  button.disabled = true;
+  button.classList.add("is-busy");
+  button.textContent = busyLabel;
+  try {
+    return await task();
+  } finally {
+    button.disabled = false;
+    button.classList.remove("is-busy");
+    button.textContent = label;
+  }
 }
 
 const reducedMotion = () =>
   window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+const REQUEST_TIMEOUT_MS = 150000;
+
 async function api(path, options) {
   let res;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    res = await fetch(path, options);
+    res = await fetch(path, { ...(options || {}), signal: controller.signal });
   } catch (err) {
+    if (err && err.name === "AbortError") throw new Error("That took too long to answer. Please try again.");
     throw new Error("Could not reach the server. Is the app running?");
+  } finally {
+    clearTimeout(timer);
   }
   if (!res.ok) throw new Error(friendlyStatus(res.status));
   try {
@@ -456,13 +499,28 @@ function storyPrev() {
 
 /* ------------------------------------------------------------- loading the pool */
 
+function showMapLoading([text, hint]) {
+  const overlay = $("map-overlay");
+  clear(overlay);
+  overlay.append(loadingBlock(text, hint));
+  overlay.hidden = false;
+}
+
+function hideMapLoading() {
+  const overlay = $("map-overlay");
+  overlay.hidden = true;
+  clear(overlay);
+}
+
 async function loadPool(options) {
   const create = Boolean(options && options.create);
   const token = ++state.token;
   state.ready = false;
   clearError();
-  setStatus($("result-status"), create ? "Building the pool and loading it into the graph database…" : "Loading the pool from the graph database…");
-  setStatus($("unmatched-status"), "Looking for swaps…");
+  showMapLoading(create
+    ? ["Building the pool…", "Drawing made-up pairs, loading them into the graph database, then searching for swaps."]
+    : ["Loading the pool…", "Reading the pairs from the graph database and searching for swaps."]);
+  setStatus($("unmatched-status"), "Looking for swaps…", "loading");
   $("map").classList.add("is-loading");
   try {
     if (create) await api("/pool", postJson({ n: state.size, seed: state.seed }));
@@ -471,7 +529,7 @@ async function loadPool(options) {
       graph = await api("/graph?max_len=2");
     } catch (err) {
       if (create) throw err;
-      setStatus($("result-status"), "Preparing a first pool…");
+      setStatus($("result-status"), "Preparing a first pool…", "loading");
       await api("/pool", postJson({ n: state.size, seed: state.seed }));
       graph = await api("/graph?max_len=2");
     }
@@ -492,12 +550,14 @@ async function loadPool(options) {
     $("size").value = String(Math.min(300, Math.max(20, state.size)));
     $("size-value").textContent = $("size").value;
     $("map").classList.remove("is-loading");
+    hideMapLoading();
     buildMap();
     renderAll();
     if (state.step === "hood") { loadProof(); loadTrace(); }
   } catch (err) {
     if (token !== state.token) return;
     $("map").classList.remove("is-loading");
+    hideMapLoading();
     setStatus($("result-status"), "");
     setStatus($("unmatched-status"), "");
     showError(err.message, () => loadPool(options));
@@ -748,7 +808,7 @@ function suggestions(hostId) {
 function renderDetails() {
   if (!state.ready) {
     const first = state.step === "leftout" ? $("detail-leftout") : $("detail-results");
-    if (first && !first.firstChild) first.append(el("p", { class: "muted", text: "Waiting for the pool…" }));
+    if (first && !first.firstChild) first.append(loadingBlock("Waiting for the pool…"));
     return;
   }
   if (state.step === "results") renderDetail($("detail-results"));
@@ -844,7 +904,7 @@ async function renderLeftOutDetail(host, id, seq) {
   host.append(
     el("p", { class: "detail-kicker" }, el("span", { class: "badge badge-muted", text: "Left out" })),
     el("h3", { text: `Pair ${id} is not in a swap` }),
-    el("p", { class: "muted", text: "Asking the graph who could have helped…" }),
+    loadingBlock("Asking the graph who could have helped…"),
   );
   let env;
   try {
@@ -1060,7 +1120,7 @@ function chainSentence(chain) {
 
 async function runWhatIf(body, out, label) {
   clear(out);
-  out.append(el("p", { class: "muted", text: `${label}: trying it on a copy of the pool…` }));
+  out.append(loadingBlock(`${label}…`, "Copying the pool, then re-planning every swap. This can take several seconds."));
   let env;
   try {
     env = await api("/tools/what_if", postJson(body));
@@ -1076,9 +1136,7 @@ async function runWhatIf(body, out, label) {
 async function runAltruist() {
   const out = $("whatif-altruist-out");
   const button = $("whatif-altruist");
-  button.disabled = true;
-  const env = await runWhatIf({ kind: "add_altruistic_donor", donor_abo: "O", max_len: state.maxLen }, out, "Adding a donor");
-  button.disabled = false;
+  const env = await withBusy(button, "Trying it…", () => runWhatIf({ kind: "add_altruistic_donor", donor_abo: "O", max_len: state.maxLen }, out, "Adding a donor"));
   if (!env) return;
   const r = env.result || {};
   const before = r.before || {};
@@ -1096,7 +1154,7 @@ async function runAltruist() {
   if (r.note) out.append(el("p", { class: "fine-print", text: r.note }));
 }
 
-async function runRemove(id) {
+async function runRemove(id, button) {
   const out = $("whatif-remove-out");
   const node = state.nodesById[id];
   if (!node) {
@@ -1107,7 +1165,8 @@ async function runRemove(id) {
   const plan = currentPlan();
   const index = plan.owner.get(id);
   const ring = index == null ? null : plan.cycles[index];
-  const env = await runWhatIf({ kind: "remove_pair", pair_id: id, max_len: state.maxLen }, out, `Removing pair ${id}`);
+  const attempt = () => runWhatIf({ kind: "remove_pair", pair_id: id, max_len: state.maxLen }, out, `Removing pair ${id}`);
+  const env = button ? await withBusy(button, "Trying it…", attempt) : await attempt();
   if (!env) return;
   const r = env.result || {};
   if (env.outcome === "unknown_entity") {
@@ -1147,7 +1206,7 @@ function populateRemoveChoices() {
 async function setFairness(on) {
   state.priorityOn = on;
   $("fairness").checked = on;
-  setStatus($("result-status"), "Re-planning the swaps…");
+  setStatus($("result-status"), "Re-planning the swaps…", "loading");
   try {
     await Promise.all([fetchPlan(2), fetchPlan(3)]);
     if (state.priorityOn !== on) return;
@@ -1163,17 +1222,27 @@ function hardMatched(plan) {
   return { matched: hard.filter((n) => plan.owner.has(n.id)).length, total: hard.length };
 }
 
-async function compareFairness() {
-  if (!state.ready) return;
+let fairnessPending = null;
+
+function compareFairness() {
+  if (!state.ready) return Promise.resolve();
+  if (fairnessPending) return fairnessPending;
   const host = $("fairness-live");
-  try {
-    await Promise.all([fetchPlan(state.maxLen, false), fetchPlan(state.maxLen, true)]);
-  } catch (err) {
-    clear(host);
-    host.append(el("p", { class: "status-bad", text: err.message }));
-    return;
-  }
-  renderFairnessLive();
+  fairnessPending = (async () => {
+    try {
+      await Promise.all([fetchPlan(state.maxLen, false), fetchPlan(state.maxLen, true)]);
+    } catch (err) {
+      clear(host);
+      host.append(
+        el("p", { class: "status-bad", text: err.message }),
+        el("button", { type: "button", class: "btn btn-sm", text: "Try again", onclick: () => renderFairnessLive() }));
+      return false;
+    } finally {
+      fairnessPending = null;
+    }
+    return true;
+  })().then((ok) => { if (ok) renderFairnessLive(); });
+  return fairnessPending;
 }
 
 function renderFairnessLive() {
@@ -1182,7 +1251,8 @@ function renderFairnessLive() {
   const off = state.plans[planKey(state.maxLen, false)];
   const on = state.plans[planKey(state.maxLen, true)];
   if (!off || !on) {
-    host.append(el("p", { class: "muted small", text: "Working out the comparison…" }));
+    host.append(loadingBlock("Working out the comparison…", "Planning the swaps both ways."));
+    if (state.ready && state.step === "whatif") compareFairness();
     return;
   }
   const a = hardMatched(off);
@@ -1261,7 +1331,7 @@ function buildOutcomeKey() {
 async function loadProof() {
   if (!state.proofStale) return;
   const host = $("proof");
-  setStatus($("proof-status"), "Running the independent check…");
+  setStatus($("proof-status"), "Running the independent check…", "loading");
   let proof;
   try {
     proof = await api("/proof");
@@ -1380,7 +1450,7 @@ async function askAgent(question) {
   $("q").value = text;
   const out = $("ask-out");
   clear(out);
-  out.append(el("p", { class: "muted", text: "Asking…" }));
+  out.append(loadingBlock("Asking…"));
   let body;
   try {
     body = await api("/ask", postJson({ question: text }));
@@ -1423,7 +1493,7 @@ function renderAsk(body) {
 async function lookUp(id) {
   const out = $("idcheck-out");
   clear(out);
-  out.append(el("p", { class: "muted", text: `Looking up pair ${id}…` }));
+  out.append(loadingBlock(`Looking up pair ${id}…`));
   let env;
   try {
     env = await api(`/tools/explain/${encodeURIComponent(id)}`);
@@ -1449,15 +1519,10 @@ async function lookUp(id) {
 
 async function generatePool() {
   const button = $("generate");
-  button.disabled = true;
   state.size = Number($("size").value);
   state.seed = Number($("seed").value);
   state.selected = null;
-  try {
-    await loadPool({ create: true });
-  } finally {
-    button.disabled = false;
-  }
+  await withBusy(button, "Building…", () => loadPool({ create: true }));
 }
 
 async function setLen(len) {
@@ -1620,7 +1685,7 @@ function wire() {
   $("whatif-altruist").addEventListener("click", runAltruist);
   $("whatif-remove").addEventListener("click", () => {
     const value = $("remove-pair").value;
-    runRemove(value === "" ? null : Number(value));
+    runRemove(value === "" ? null : Number(value), $("whatif-remove"));
   });
   $("whatif-random").addEventListener("click", () => {
     const plan = currentPlan();
@@ -1628,12 +1693,12 @@ function wire() {
     const ids = [...plan.owner.keys()];
     const id = ids[Math.floor(Math.random() * ids.length)];
     $("remove-pair").value = String(id);
-    runRemove(id);
+    runRemove(id, $("whatif-random"));
   });
   $("fairness").addEventListener("change", () => setFairness($("fairness").checked));
 
   $("trace-refresh").addEventListener("click", loadTrace);
-  $("ask-agent").addEventListener("click", () => askAgent());
+  $("ask-agent").addEventListener("click", () => withBusy($("ask-agent"), "Asking…", () => askAgent()));
   $("q").addEventListener("keydown", (event) => { if (event.key === "Enter") askAgent(); });
   $("id-ask").addEventListener("click", () => {
     const raw = $("id-input").value.trim();
