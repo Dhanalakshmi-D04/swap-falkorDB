@@ -168,7 +168,7 @@ Every product answer walks the graph on the request path; the Python/networkx or
 ## Run it
 Prerequisites: Python 3.12+ and Docker.
 
-**Live demo:** _TODO — the human adds the deployed URL here before submission._
+**Live demo:** http://54.90.155.247/ (synthetic data only; one small server, so please be gentle). **Demo video:** _TODO — the human adds the link before submission._
 
 The whole stack in two containers (the app plus its own FalkorDB; only the app is published):
 
