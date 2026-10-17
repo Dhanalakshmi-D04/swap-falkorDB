@@ -431,3 +431,12 @@ def test_an_id_the_user_typed_may_be_repeated_but_an_invented_one_may_not() -> N
 
     invented = run_agent("Tell me about pair 0.", catalogue=ToolCatalogue(Silent()), client=script(), llm=LLMSettings(model="fake"))
     assert invented["rejected_ids"] == [99999]
+
+
+def test_a_public_demo_caps_model_answers_per_day(monkeypatch) -> None:
+    from swap import agent
+
+    monkeypatch.setenv("LLM_DAILY_LIMIT", "2")
+    monkeypatch.setattr(agent, "_llm_calls", {})
+    assert agent._llm_budget_left() and agent._llm_budget_left()
+    assert not agent._llm_budget_left()

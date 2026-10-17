@@ -94,3 +94,13 @@ def llm_settings(env_file: str | Path | None = None) -> LLMSettings:
         provider=read(LLM_PROVIDER_ENV).lower(),
         api_version=read(LLM_API_VERSION_ENV),
     )
+
+
+def llm_daily_limit(env_file: str | Path | None = None) -> int:
+    """Model-backed answers allowed per day before `/ask` falls back to tool mode (default 200)."""
+    load_env(env_file)
+    raw = os.environ.get("LLM_DAILY_LIMIT", "").strip()
+    try:
+        return max(0, int(raw)) if raw else 200
+    except ValueError:
+        return 200

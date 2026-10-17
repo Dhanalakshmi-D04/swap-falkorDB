@@ -170,7 +170,7 @@ READ_PLAN_STEPS = (
 )
 LIST_PLANS = (
     "MATCH (pl:Plan) RETURN pl.id, pl.status, pl.created_at, pl.max_len, pl.matched, pl.swaps, "
-    "pl.decided_by ORDER BY pl.id"
+    "pl.decided_by, pl.kind ORDER BY pl.id"
 )
 DECIDE_PLAN = (
     "MATCH (pl:Plan {id: $id}) SET pl.status = $status, pl.decided_by = $by, pl.decided_at = $at "
@@ -309,9 +309,14 @@ class SwapTools:
         """Run one named statement and note what the graph did (name, ms, rows) in `self.work`."""
         started = perf_counter()
         rows = self.graph.query(CYPHER[name], params or {}).result_set
-        self.work.append(
-            {"name": name, "ms": round((perf_counter() - started) * 1000, 1), "rows": len(rows)}
-        )
+        step = {"name": name, "ms": round((perf_counter() - started) * 1000, 1), "rows": len(rows)}
+        if len(rows) == 1 and rows[0]:
+            first = rows[0][0]
+            if isinstance(first, list):
+                step["value"] = len(first)
+            elif isinstance(first, (int, float)) and not isinstance(first, bool):
+                step["value"] = int(first)
+        self.work.append(step)
         return rows
 
     def _ensure_swap_objects(self) -> None:
@@ -785,6 +790,7 @@ class SwapTools:
                 "matched": int(r[4]),
                 "swaps": int(r[5]),
                 "decided_by": r[6],
+                "kind": r[7] or "plan",
             }
             for r in rows
         ]

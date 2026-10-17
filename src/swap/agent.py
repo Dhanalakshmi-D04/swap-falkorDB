@@ -21,10 +21,11 @@ import inspect
 import json
 import re
 from dataclasses import dataclass
+from datetime import date
 from types import NoneType, UnionType
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
-from swap.config import DEFAULT_ACTIVE_GRAPH, LLMSettings, llm_settings
+from swap.config import DEFAULT_ACTIVE_GRAPH, LLMSettings, llm_daily_limit, llm_settings
 from swap.tools import SwapTools
 
 TOOL_ORDER: tuple[str, ...] = (
@@ -618,5 +619,23 @@ def run_agent(
     cfg = llm if llm is not None else llm_settings()
     if client is None and not cfg.configured():
         return run_tool_mode(question, catalogue)
+    if client is None and not _llm_budget_left():
+        answer = run_tool_mode(question, catalogue)
+        answer["note"] = "today's model budget for this demo is used up; answered in tool mode"
+        return answer
     client = client if client is not None else _build_client(cfg)
     return _run_llm(question, catalogue, client, cfg.model, max_steps)
+
+
+_llm_calls: dict[str, int] = {}
+
+
+def _llm_budget_left() -> bool:
+    """A public demo caps model-backed answers per day (`LLM_DAILY_LIMIT`, default 200)."""
+    today = date.today().isoformat()
+    used = _llm_calls.get(today, 0)
+    if used >= llm_daily_limit():
+        return False
+    _llm_calls.clear()
+    _llm_calls[today] = used + 1
+    return True

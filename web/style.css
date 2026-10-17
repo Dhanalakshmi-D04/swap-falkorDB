@@ -652,3 +652,28 @@ table.grid td.args { max-width: 320px; overflow: hidden; text-overflow: ellipsis
   .spinner, .btn.is-busy::before { animation: none; }
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
 }
+
+/* ---- step 6: when a lab test fails, and "what FalkorDB did" ---------------------------- */
+.arc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0.8rem; margin: 0.6rem 0 1rem; }
+.arc-card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); padding: 0.7rem 0.8rem; }
+.arc-title { margin: 0 0 0.5rem; }
+.arc-buttons { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.arc-buttons .btn { font-family: var(--mono); font-size: 0.8rem; }
+.arc-buttons .btn:hover { border-color: var(--bad); color: var(--bad); }
+#fail-impact, #fail-repair { margin-top: 1.6rem; }
+#fail-impact .facts { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.graph-work { margin: 0.6rem 0 0.2rem; }
+.work-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.4rem; }
+.work-table th, .work-table td { text-align: left; padding: 0.3rem 0.4rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+.work-table .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.work-name { display: block; font-family: var(--mono); font-size: 0.72rem; color: var(--muted); }
+.guard { padding: 0.5rem 0.7rem; border-left: 3px solid var(--green); background: var(--green-soft); font-size: 0.9rem; margin: 0.8rem 0; }
+.guard-bad { border-left-color: var(--bad); background: var(--accent-soft); }
+.blockers { list-style: none; padding: 0; margin: 0.4rem 0; display: grid; gap: 0.3rem; }
+.blockers .chip { font-family: var(--mono); font-size: 0.8rem; cursor: default; }
+@media (max-width: 640px) {
+  #fail-impact .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .work-table { font-size: 0.78rem; }
+}
+.blockers li { display: flex; align-items: center; gap: 0.5rem; font-size: 0.88rem; color: var(--ink-2); }
+.blockers li .chip { flex: none; }

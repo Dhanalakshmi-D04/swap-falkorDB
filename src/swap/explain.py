@@ -57,9 +57,10 @@ ALTERNATIVE_ROUTES = (
     "RETURN [x.id] + [n IN nodes(path) | n.id] AS ring ORDER BY size(ring), ring"
 )
 PLAN_KEYS = "MATCH (:Plan {id: $id})-[:SELECTS]->(c:Cycle) WHERE c.live RETURN c.key ORDER BY c.key"
+# The latest plan a patient is explained against; a repair (a handful of swaps) is not one.
 LATEST_PLAN = (
-    "MATCH (pl:Plan) WHERE pl.status IN ['draft', 'approved'] RETURN pl.id, pl.status "
-    "ORDER BY pl.id DESC LIMIT 1"
+    "MATCH (pl:Plan) WHERE pl.status IN ['draft', 'approved'] AND coalesce(pl.kind, 'plan') = 'plan' "
+    "RETURN pl.id, pl.status ORDER BY pl.id DESC LIMIT 1"
 )
 
 EXPLAIN_CYPHER: dict[str, str] = {

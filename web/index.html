@@ -32,7 +32,8 @@
           <li><a href="#/leftout" data-step="leftout"><span class="stepper-num">3</span><span class="stepper-label">Left out</span></a></li>
           <li><a href="#/whatif" data-step="whatif"><span class="stepper-num">4</span><span class="stepper-label">What if?</span></a></li>
           <li><a href="#/plan" data-step="plan"><span class="stepper-num">5</span><span class="stepper-label">Plan</span></a></li>
-          <li><a href="#/hood" data-step="hood"><span class="stepper-num">6</span><span class="stepper-label">Proof</span></a></li>
+          <li><a href="#/fail" data-step="fail"><span class="stepper-num">6</span><span class="stepper-label">Test fails</span></a></li>
+          <li><a href="#/hood" data-step="hood"><span class="stepper-num">7</span><span class="stepper-label">Proof</span></a></li>
         </ol>
       </nav>
       <div class="topbar-actions">
@@ -282,7 +283,43 @@
       </div>
     </section>
 
-    <!-- STEP 6: PROOF ---------------------------------------------------------- -->
+    <!-- STEP 6: WHEN A TEST FAILS ----------------------------------------------- -->
+    <section class="panel" data-panel="fail" aria-labelledby="fail-title" hidden>
+      <div id="fail" class="block">
+        <h2 id="fail-title">When a lab test fails</h2>
+        <p class="block-sub">
+          Most planned exchange transplants never happen, and a failed
+          <button type="button" class="term" data-term="crossmatch">crossmatch</button>, the lab test just before
+          surgery, is a common reason. Record one here and watch the graph react: every swap that needed
+          that link dies, the approved swap breaks, its patients are stranded, and the graph looks for
+          what can still be saved.
+        </p>
+
+        <div id="fail-empty" class="callout" hidden>
+          <p><strong>Approve a plan first.</strong> A failed test matters when it breaks a swap someone already approved.</p>
+          <button type="button" id="fail-goto-plan" class="btn btn-sm">Go to the plan step</button>
+        </div>
+
+        <div id="fail-pick" hidden>
+          <h3 class="kicker">1. Who is recording the result, and which link did the lab test? <span class="muted small" id="fail-plan-label"></span></h3>
+          <div class="decision-row">
+            <input type="text" id="fail-by" maxlength="80" placeholder="Your name (a person records lab results, never the AI)" autocomplete="name" aria-label="Who is recording this result" />
+          </div>
+          <p id="fail-message" class="status status-bad" role="alert" hidden></p>
+          <div id="fail-arcs" class="arc-grid"></div>
+        </div>
+
+        <div id="fail-impact" aria-live="polite"></div>
+        <div id="fail-repair" aria-live="polite"></div>
+
+        <div id="fail-ledger-wrap" class="ledger-wrap" hidden>
+          <h3 class="kicker">Lab results recorded in the graph</h3>
+          <ul id="fail-ledger" class="ledger"></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 7: PROOF ---------------------------------------------------------- -->
     <section class="panel" data-panel="hood" aria-labelledby="hood-title" hidden>
       <div id="hood" class="block">
         <h2 id="hood-title">Can you trust it?</h2>
@@ -372,6 +409,7 @@
           <li><strong>Synthetic data only.</strong> Every patient is generated from a seed; nothing here is a real person.</li>
           <li><strong>A known result, reproduced.</strong> The 2-way vs 3-way effect is the finding of Roth, Sönmez and Ünver (2007). We re-implement it; we do not discover it.</li>
           <li><strong>The upper bound is not a plan.</strong> The max-flow figure also allows chains, so it is not a set of swaps you could perform.</li>
+          <li><strong>The computer picks, the graph decides what is possible.</strong> An integer program chooses the swaps, but only among the swaps the graph stored, scored and still holds alive, and the graph checks every plan before it is saved.</li>
           <li><strong>Not medical advice.</strong> Decision support for a coordinator, on synthetic data, with no clinical validation.</li>
         </ul>
       </div>

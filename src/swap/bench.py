@@ -3,7 +3,8 @@
 Loads a pool (default N=300, seed 1000) and plays the loop a coordinator would: best set, draft,
 approve, a positive crossmatch on an approved 3-way swap, its impact, a repair, an explanation and
 a what-if. Every tool reports the statements it ran (`graph_work`); this prints the median time of
-each over `--runs` fresh loads, as the Markdown table the README quotes.
+each over `--runs` fresh loads, as the Markdown table the README quotes. "count" is what the
+statement returned: the swaps it created, touched or read, or the rows it returned.
 """
 
 from __future__ import annotations
@@ -48,7 +49,7 @@ def _play(tools: SwapTools, n: int, seed: int) -> dict[str, tuple[float, int]]:
 
     def note(work: list[dict[str, Any]]) -> None:
         for step in work:
-            seen.setdefault(step["name"], (step["ms"], step["rows"]))
+            seen.setdefault(step["name"], (step["ms"], step.get("value", step["rows"])))
 
     stats = load_pool(generate_pool(n, seed), GRAPH, db=tools.db)
     for length in (3, 2):
@@ -69,12 +70,13 @@ def _play(tools: SwapTools, n: int, seed: int) -> dict[str, tuple[float, int]]:
     note(recorded["impact"]["graph_work"])
     note(tools.draft_repair(recorded["crossmatch"]["id"])["result"]["graph_work"])
 
-    waiting = tools.graph.query(
-        "MATCH (p:Pair) WHERE p.committed IS NULL MATCH (p)<-[:HAS]-(c:Cycle) WHERE c.live "
-        "RETURN p.id LIMIT 1"
+    planned = {pair for swap in draft["swaps"] for pair in swap["pairs"]}
+    with_swaps = tools.graph.query(
+        "MATCH (c:Cycle) WHERE c.live UNWIND c.members AS m RETURN DISTINCT m ORDER BY m"
     ).result_set
-    if waiting:
-        note(tools.explain_unmatched(int(waiting[0][0]))["result"]["graph_work"])
+    left_out = [int(row[0]) for row in with_swaps if int(row[0]) not in planned]
+    if left_out:
+        note(tools.explain_unmatched(left_out[0], draft["plan"]["id"])["result"]["graph_work"])
 
     copied = tools.what_if("remove_pair", {"pair_id": members[2]})["result"]["scratch"]
     seen["whatif_copy"] = (copied["copy_ms"], 1)
@@ -105,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         drop_graph(db, GRAPH)
 
     print(f"N={options.n} pairs, seed {options.seed}, median of {options.runs} fresh loads\n")
-    print("| step | what FalkorDB does | ms | rows |")
+    print("| step | what FalkorDB does | ms | count |")
     print("|---|---|---:|---:|")
     for name, what in ROWS:
         if name in timings:

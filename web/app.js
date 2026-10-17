@@ -169,6 +169,8 @@ const GLOSSARY = {
   graph: ["Graph database", "A database that stores things (here, pairs) as dots and the relationships between them (\"this donor can give to that patient\") as links. Swap uses FalkorDB. Finding swaps is then following links around a loop."],
   solver: ["Solver", "A program that picks the best combination from many options. Here it chooses the set of swaps that helps the most patients, with no pair used twice."],
   cypher: ["Cypher", "The language used to ask a graph database questions, for example \"find three pairs that form a loop\". In Swap a person writes every query. The AI never does."],
+  backarc: ["Back-arc", "In a 3-way ring A→B→C→A, a back-arc is a link the other way, say B→A. If C drops out, A and B can still swap with each other. The UK national scheme counts these when it chooses rings."],
+  stranded: ["Stranded", "A patient whose approved swap broke, for example because a lab test failed. They are back in the pool and need a new swap."],
   synthetic: ["Synthetic", "Made up by a computer using published statistics. No real patient or person is in this app."],
 };
 
@@ -276,6 +278,7 @@ const STEPS = [
   { id: "leftout", label: "Left out" },
   { id: "whatif", label: "What if?" },
   { id: "plan", label: "Plan" },
+  { id: "fail", label: "Test fails" },
   { id: "hood", label: "Proof" },
 ];
 
@@ -382,10 +385,13 @@ function goStep(id, options) {
 }
 
 function enterStep(id) {
+  // Before the pool is ready there is nothing to render; loadPool renders every step when it is.
+  if (!state.ready && ["results", "leftout", "whatif"].includes(id)) return;
   if (id === "results" || id === "leftout") renderDetails();
   if (id === "leftout") renderLeftout();
   if (id === "whatif") compareFairness();
   if (id === "plan") loadPlans();
+  if (id === "fail") loadFailStep();
   if (id === "hood") {
     loadProof();
     loadTrace();
@@ -986,7 +992,7 @@ async function renderLeftOutDetail(host, id, seq) {
       el("li", {}, el("span", { class: "key key-busy" }), "donor already giving in another swap")));
   }
 
-  host.append(explainVerdict(id, incoming, covered, result));
+  host.append(graphVerdict(result));
   if (env.outcome === "not_in_graph" || !incoming.length) {
     host.append(el("div", { class: "callout" },
       strong("The graph does not know of any donor here."),
@@ -995,24 +1001,30 @@ async function renderLeftOutDetail(host, id, seq) {
   }
 }
 
-function explainVerdict(id, incoming, covered, result) {
+function graphVerdict(result) {
   const box = el("div", { class: "verdict" });
-  box.append(el("h4", { text: "So why no swap?" }));
-  if (!incoming.length) {
-    box.append(el("p", { text: "Nobody in this pool can give to this patient, so no swap can end with them getting a kidney." }));
-    return box;
+  box.append(el("h4", { text: "So why no swap? The graph's answer" }));
+  const against = result.against || {};
+  const where = against.kind === "plan" ? `plan ${against.plan}` : "the best set of swaps of up to 3 pairs";
+  box.append(el("p", {}, result.summary || ""));
+  const blocked = result.blocked_by || [];
+  if (blocked.length) {
+    box.append(el("ul", { class: "blockers" }, blocked.map((b) => el("li", {},
+      el("span", { class: "chip", text: b.members.map((x) => `#${x}`).join(" → ") }),
+      ` blocks ${b.blocks} of this patient's ${plural(b.blocks, "option")}`))));
   }
-  const busy = incoming.filter((x) => covered.has(x));
-  const rings = (result.cycles_through || []).filter((c) => c.length <= state.maxLen);
-  const blocked = rings.filter((c) => c.some((x) => Number(x) !== id && covered.has(Number(x))));
-  box.append(el("p", {}, strong(incoming.length), ` ${plural(incoming.length, "donor", "donors")} could help, but `, strong(busy.length), ` already ${plural(busy.length, "gives", "give")} in another swap, and a donor can only be used once.`));
-  if (!rings.length) {
-    box.append(el("p", { text: `No ring of up to ${state.maxLen} pairs closes through this patient: there is no way for their own donor to give to someone who leads back to them.` }));
-  } else if (blocked.length === rings.length) {
-    box.append(el("p", {}, `${rings.length} ${plural(rings.length, "ring")} of up to ${state.maxLen} pairs ${plural(rings.length, "passes", "pass")} through this patient, but `, strong(plural(blocked.length, "it needs", "each needs")), " someone who is already in another swap. Swap picks the set that helps the most people overall, so this patient lost out."));
-  } else {
-    box.append(el("p", {}, `${rings.length} ${plural(rings.length, "ring")} ${plural(rings.length, "passes", "pass")} through this patient and ${blocked.length} of them clash with other swaps. The best overall plan used other rings instead.`));
+  const ring = (result.shortest_ring || {}).ring || [];
+  if (["ring_too_long", "no_ring"].includes(result.verdict) && ring.length) {
+    box.append(el("p", {}, "Shortest ring back to this patient: ", strong(ring.map((x) => `#${x}`).join(" → ")), "."));
+    const routes = result.alternative_routes || [];
+    if (routes.length > 1) box.append(el("p", { class: "muted small", text: `${routes.length} equally short routes (algo.SPpaths): ${routes.map((r) => r.join("→")).join(" · ")}` }));
   }
+  if (result.verdict === "no_outgoing") {
+    box.append(el("p", { class: "muted small" }, "Only a chain started by an ", term("altruistic", "altruistic donor"), " could help. ",
+      el("button", { type: "button", class: "btn btn-sm", text: "Try adding one", onclick: () => goStep("whatif") })));
+  }
+  box.append(el("p", { class: "muted small", text: `Explained against ${where}.` }));
+  box.append(graphWorkBlock(result.graph_work, "What FalkorDB walked to answer this"));
   return box;
 }
 
@@ -1412,19 +1424,29 @@ function renderPlan(packet) {
   }
   sheet.append(swaps);
 
+  if (packet.guard) sheet.append(guardLine(packet.guard));
+  if (plan.status === "draft") sheet.append(graphWorkBlock(packet.graph_work));
   sheet.append(approvalBlock(packet));
+  if (plan.status === "approved" && plan.kind !== "repair") {
+    sheet.append(el("p", {}, el("a", { class: "btn btn-sm", href: "#/fail", text: "Next: what if a lab test fails? →" })));
+  }
   sheet.append(el("p", { class: "fine-print", text: packet.notice }));
   sheet.append(el("p", {}, el("a", { class: "btn btn-sm", href: `/plans/${plan.id}/packet.md`, download: `swap-plan-${plan.id}.md`, text: "Download the packet (.md)" })));
 }
 
-function approvalBlock(packet) {
+function approvalBlock(packet, onDecided) {
   const plan = packet.plan;
   if (plan.status !== "draft") {
     const verb = plan.status === "approved" ? "Approved" : "Rejected";
-    const note = plan.status === "approved" ? "Its pairs are now committed in the graph and skipped by later drafts." : "Nothing was committed.";
+    const effects = packet.effects || {};
+    const taken = effects.swaps_now_unavailable != null
+      ? ` The graph committed ${effects.committed_pairs} pairs and marked ${Number(effects.swaps_now_unavailable).toLocaleString()} stored swaps that touch them as taken.`
+      : "";
+    const note = plan.status === "approved" ? `Its pairs are now committed in the graph and skipped by later drafts.${taken}` : "Nothing was committed.";
     return el("div", { class: `decision decision-${plan.status}` },
       el("p", {}, strong(`${verb} by ${plan.decided_by}`), ` on ${new Date(plan.decided_at).toLocaleString()}.`),
-      el("p", { class: "small muted", text: `${note} The decision is recorded on the plan in the graph.` }));
+      el("p", { class: "small muted", text: `${note} The decision is recorded on the plan in the graph.` }),
+      graphWorkBlock(packet.graph_work, "What FalkorDB did on approval"));
   }
   const input = el("input", { type: "text", id: "plan-by", maxlength: "80", placeholder: "Your name", autocomplete: "name", "aria-label": "Your name" });
   const message = el("p", { class: "status status-bad", role: "alert", hidden: true });
@@ -1435,6 +1457,10 @@ function approvalBlock(packet) {
     const button = event.currentTarget;
     try {
       const env = await withBusy(button, decision === "approve" ? "Approving…" : "Rejecting…", () => api(`/plans/${plan.id}/decision`, postJson({ decision, decided_by: who })));
+      if (onDecided) {
+        await onDecided(env.result);
+        return;
+      }
       renderPlan(env.result);
       await loadPlans();
     } catch (err) {
@@ -1449,6 +1475,269 @@ function approvalBlock(packet) {
       el("button", { type: "button", class: "btn btn-primary", text: "Approve", onclick: decide("approve") }),
       el("button", { type: "button", class: "btn", text: "Reject", onclick: decide("reject") })),
     message);
+}
+
+/* ---------------------------------------------- what FalkorDB did, shown after an action */
+
+const WORK_LABELS = {
+  candidates_all: "Read every live swap stored in the graph",
+  candidates_available: "Read the swaps still available (none dead, none taken)",
+  swap_fingerprint: "Fingerprint the stored swaps (is a saved answer still valid?)",
+  pool_fingerprint: "Fingerprint the pool",
+  guard_pairs: "Check the draft: no pair twice, no swap dead or taken",
+  guard_arcs: "Check the draft: every donor → patient link still exists",
+  next_plan_id: "Number the plan",
+  create_plan: "Write the plan",
+  add_plan_steps: "Write who gives to whom",
+  add_selects: "Link the plan to the swaps it chose",
+  plan_stale_check: "Check nothing in the plan broke or was taken since it was drafted",
+  decide_plan: "Record the decision, the name and the time",
+  commit_pairs: "Commit the plan's pairs",
+  mark_taken: "Mark every swap touching those pairs as taken",
+  crossmatch_arc_exists: "Find the tested link",
+  next_crossmatch_id: "Number the result",
+  record_crossmatch: "Record the lab result on the two pairs",
+  break_cycles: "Kill every stored swap that needed this link",
+  drop_arc: "Remove the link",
+  drop_flow_arc: "Remove it from the max-flow network",
+  release_stranded: "Release the patients of the broken approved swap",
+  retake: "Re-open swaps through the released patients",
+  read_crossmatch: "Read the result",
+  swaps_killed: "Count the swaps it killed",
+  broken_planned: "Find planned swaps it broke",
+  stranded: "Find the stranded patients",
+  rescue_embedded_2way: "Look for a 2-way swap still alive inside the broken ring",
+  options_of_stranded: "Count the live swaps left for each stranded patient",
+  repairs_after: "Find repairs already drafted",
+  repair_candidates: "Read live swaps through the stranded patients",
+  link_repair: "Link the repair to the broken plan and the lab result",
+  explain_latest_plan: "Find the latest plan",
+  explain_plan_keys: "Read the swaps that plan chose",
+  explain_options: "Count this patient's stored swaps",
+  explain_in_chosen: "Is this patient in a chosen swap?",
+  explain_donor_reach: "Count who this donor can give to, and who can give to this patient",
+  explain_blocked_by: "Walk 4 hops: this patient → their swaps → other pairs → the chosen swap holding them",
+  explain_shortest_ring: "Find the shortest ring back to this patient (shortestPath)",
+  explain_alternative_routes: "List equally short routes (algo.SPpaths)",
+};
+
+function graphWorkBlock(work, title) {
+  if (!work || !work.length) return null;
+  const total = work.reduce((sum, step) => sum + Number(step.ms || 0), 0);
+  const rows = work.map((step) => el("tr", {},
+    el("td", {}, WORK_LABELS[step.name] || step.name, el("code", { class: "work-name", text: step.name })),
+    el("td", { class: "num", text: `${Number(step.ms).toFixed(1)} ms` }),
+    el("td", { class: "num", text: step.value != null ? Number(step.value).toLocaleString() : "" })));
+  return el("details", { class: "fold-inline graph-work" },
+    el("summary", {}, `${title || "What FalkorDB just did"}: ${work.length} ${plural(work.length, "query", "queries")}, ${total.toFixed(1)} ms`),
+    el("table", { class: "work-table" },
+      el("thead", {}, el("tr", {}, el("th", { text: "Step" }), el("th", { class: "num", text: "Time" }), el("th", { class: "num", text: "Count" }))),
+      el("tbody", {}, rows)));
+}
+
+/* -------------------------------------------------------- step 6: when a lab test fails */
+
+const failState = { planId: null, swaps: [] };
+
+async function refreshAfterGraphChange() {
+  // Fetch the new best sets first and swap them in at once: anything that renders meanwhile
+  // still sees the previous ones, never an empty cache.
+  state.explained = {};
+  state.proofStale = true;
+  try {
+    const fresh = {};
+    for (const len of [2, 3]) {
+      const on = state.priorityOn;
+      const env = await api(`/tools/best_set?max_len=${len}${on ? `&priority=${state.priorityWeight}` : ""}`);
+      const result = env.result || {};
+      fresh[planKey(len)] = makePlan(Array.isArray(result.cycles) ? result.cycles : [], result.chains);
+    }
+    state.plans = fresh;
+    renderAll();
+  } catch (err) {
+    showError(err.message, refreshAfterGraphChange);
+  }
+}
+
+async function loadFailStep() {
+  if (!state.ready) return;
+  let plans;
+  try {
+    plans = (await api("/plans")).result.plans || [];
+  } catch (err) {
+    setStatus($("fail-message"), err.message, "bad");
+    return;
+  }
+  const approved = plans.filter((p) => p.status === "approved" && p.kind !== "repair");
+  const latest = approved.length ? approved[approved.length - 1] : null;
+  $("fail-empty").hidden = Boolean(latest);
+  $("fail-pick").hidden = !latest;
+  loadFailLedger();
+  if (!latest) return;
+  const packet = (await api(`/plans/${latest.id}`)).result;
+  failState.planId = latest.id;
+  failState.swaps = packet.swaps;
+  $("fail-plan-label").textContent = `(approved plan ${latest.id})`;
+  renderArcs();
+}
+
+function renderArcs() {
+  const host = $("fail-arcs");
+  clear(host);
+  const live = failState.swaps.filter((swap) => swap.live);
+  const ordered = [...live.filter((w) => w.size === 3), ...live.filter((w) => w.size === 2)].slice(0, 6);
+  for (const swap of ordered) {
+    host.append(el("div", { class: "arc-card" },
+      el("p", { class: "arc-title" }, strong(`${swap.size}-way swap`), el("span", { class: "muted small", text: ` ${swap.pairs.map((x) => `#${x}`).join(" → ")} → #${swap.pairs[0]}` })),
+      el("div", { class: "arc-buttons" }, swap.steps.map((step) => el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        title: `Record a positive crossmatch: the donor of pair ${step.donor_pair} cannot give to the patient of pair ${step.patient_pair}`,
+        onclick: (event) => recordFailure(step, event.currentTarget),
+      }, `✕ #${step.donor_pair} → #${step.patient_pair}`)))));
+  }
+  if (!ordered.length) host.append(el("p", { class: "muted", text: "Every swap in this plan is already broken." }));
+}
+
+async function recordFailure(step, button) {
+  const who = $("fail-by").value.trim();
+  const message = $("fail-message");
+  if (!who) {
+    message.hidden = false;
+    message.textContent = "Type who is recording this result. A lab result is entered by a person, never by the AI.";
+    $("fail-by").focus();
+    return;
+  }
+  message.hidden = true;
+  const body = { donor_pair: step.donor_pair, patient_pair: step.patient_pair, result: "positive", recorded_by: who };
+  let env;
+  try {
+    env = await withBusy(button, "Recording…", () => api("/crossmatch", postJson(body)));
+  } catch (err) {
+    message.hidden = false;
+    message.textContent = err.message;
+    return;
+  }
+  clear($("fail-repair"));
+  renderImpact(env.result, env.result.graph_work);
+  await refreshAfterGraphChange();
+  const packet = (await api(`/plans/${failState.planId}`)).result;
+  failState.swaps = packet.swaps;
+  renderArcs();
+  loadFailLedger();
+}
+
+function renderImpact(recorded, recordWork) {
+  const host = $("fail-impact");
+  clear(host);
+  const impact = recorded.impact || recorded;
+  const test = impact.crossmatch;
+  const broken = impact.broken_planned_swaps || [];
+  const stranded = impact.stranded || [];
+  const rescue = impact.rescue || [];
+  const options = impact.options_left || {};
+  host.append(el("h3", { class: "kicker", text: "2. What the graph found" }));
+  host.append(el("p", {}, "Positive crossmatch: the donor of ", strong(`pair ${test.donor_pair}`), " cannot give to the patient of ", strong(`pair ${test.patient_pair}`), `. Recorded by ${test.recorded_by}.`));
+  host.append(el("div", { class: "facts" },
+    factItem(impact.swaps_killed, plural(impact.swaps_killed, "swap died", "swaps died"), "every stored swap that needed this link"),
+    factItem(broken.filter((b) => b.status === "approved").length, "approved swap broken", broken.map((b) => b.key).join(", ") || "none"),
+    factItem(stranded.length, plural(stranded.length, "patient stranded", "patients stranded"), "back in the pool"),
+    factItem(rescue.length, rescue.length === 1 ? "2-way rescue found" : "2-way rescues found", rescue.map((r) => r.rescue).join(", ") || "none")));
+  if (stranded.length) {
+    host.append(el("ul", { class: "reason-list" }, stranded.map((p) => {
+      const left = options[String(p.id)];
+      const now = p.now_committed_to ? ` Now in plan ${p.now_committed_to}.` : "";
+      const note = left == null ? "" : left === 0 ? " No live swap left: waits for the next match run." : ` ${left} live ${plural(left, "swap")} left.`;
+      return el("li", {}, strong(`Pair ${p.id}`), ` (patient ${abo(p.patient_abo)}, donor ${abo(p.donor_abo)}) `, diffPill(p.pra), `.${note}${now}`);
+    })));
+  }
+  if (rescue.length) {
+    host.append(el("div", { class: "callout callout-good" }, strong("Something can be saved."),
+      ` Inside the broken ring the graph found ${rescue.map((r) => r.members.map((x) => `#${x}`).join(" ⇄ ")).join(", ")}: these two can still swap with each other, thanks to a `, term("backarc", "back-arc"), "."));
+  }
+  host.append(graphWorkBlock(recordWork, "What FalkorDB did when the result came in"));
+  host.append(graphWorkBlock(impact.graph_work, "What FalkorDB read to describe the damage"));
+  if (stranded.some((p) => !p.now_committed_to)) {
+    host.append(el("div", { class: "plan-actions" },
+      el("button", { type: "button", class: "btn btn-primary", text: "Draft a repair", onclick: (event) => draftRepair(test.id, event.currentTarget) }),
+      el("p", { class: "muted small", text: "The agent drafts from the swaps still alive, re-matching the stranded patients first. A person approves it." })));
+  }
+}
+
+async function draftRepair(testId, button) {
+  const host = $("fail-repair");
+  clear(host);
+  let env;
+  try {
+    env = await withBusy(button, "Drafting…", () => api(`/crossmatches/${testId}/repair`, postJson({ max_len: 3 })));
+  } catch (err) {
+    host.append(el("p", { class: "status-bad", text: err.message }));
+    return;
+  }
+  host.append(el("h3", { class: "kicker", text: "3. The repair" }));
+  if (env.outcome !== "answered_with_path") {
+    host.append(el("div", { class: "callout" }, strong("No repair possible right now. "), env.result.note || ""));
+    host.append(graphWorkBlock(env.result.graph_work));
+    return;
+  }
+  renderRepair(env.result);
+}
+
+function renderRepair(packet) {
+  const host = $("fail-repair");
+  clear(host);
+  host.append(el("h3", { class: "kicker", text: "3. The repair" }));
+  const repair = packet.repair || {};
+  const plan = packet.plan;
+  host.append(el("div", { class: "sheet-head" },
+    el("div", {}, el("h3", { text: `Repair plan ${plan.id}` }), el("p", { class: "muted small", text: `After lab result ${repair.crossmatch_id ?? ""}` })),
+    statusBadge(plan.status)));
+  if (repair.rematched) {
+    host.append(el("p", {}, "Re-matches ", strong(repair.rematched.map((x) => `#${x}`).join(", ") || "nobody"),
+      repair.still_waiting && repair.still_waiting.length ? `; still waiting: ${repair.still_waiting.map((x) => `#${x}`).join(", ")}.` : ".",
+      repair.used_embedded_2way && repair.used_embedded_2way.length ? ` Uses the rescued swap ${repair.used_embedded_2way.join(", ")}.` : ""));
+  }
+  host.append(el("ol", { class: "sheet-swaps" }, packet.swaps.map((swap) => el("li", {},
+    el("p", { class: "sheet-swap-title" }, strong(`Swap ${swap.index}`), el("span", { class: "muted small", text: ` ${swap.size}-way` })),
+    el("ul", {}, swap.steps.map((step) => el("li", {}, strong(`Pair ${step.donor_pair}`), "'s donor gives to ", strong(`Pair ${step.patient_pair}`), "'s patient")))))));
+  if (packet.guard) host.append(guardLine(packet.guard));
+  host.append(approvalBlock(packet, async (decided) => {
+    renderRepair(decided);
+    await refreshAfterGraphChange();
+    loadPlans();
+  }));
+  host.append(graphWorkBlock(packet.graph_work));
+}
+
+function guardLine(guard) {
+  return el("p", { class: `guard ${guard.ok ? "guard-ok" : "guard-bad"}` },
+    strong(guard.ok ? "FalkorDB checked this draft before saving it: " : "FalkorDB rejected this draft: "),
+    `${guard.cycles} ${plural(guard.cycles, "swap")}, ${guard.pairs} pairs, ${guard.arcs_checked} donor → patient links all present, no pair used twice, nothing broken or taken.`);
+}
+
+async function loadFailLedger() {
+  let tests = [];
+  try {
+    tests = (await api("/crossmatches")).result.crossmatches || [];
+  } catch {
+    return;
+  }
+  const list = $("fail-ledger");
+  clear(list);
+  $("fail-ledger-wrap").hidden = !tests.length;
+  for (const t of [...tests].reverse()) {
+    list.append(el("li", {}, el("button", { type: "button", class: "ledger-row", onclick: () => showImpact(t.id) },
+      el("span", { class: "ledger-id", text: `Result ${t.id}` }),
+      el("span", { class: `badge badge-${t.result === "positive" ? "bad" : "ok"}`, text: t.result }),
+      el("span", { class: "muted small", text: `#${t.donor_pair} → #${t.patient_pair} · ${t.swaps_killed} swaps killed · ${t.recorded_by}` }))));
+  }
+}
+
+async function showImpact(id) {
+  const env = await api(`/crossmatches/${id}/impact`);
+  if (env.outcome === "unknown_entity") return;
+  clear($("fail-repair"));
+  renderImpact(env.result, null);
 }
 
 /* ------------------------------------------------------- step 5: behind the scenes */
@@ -1749,7 +2038,11 @@ const TOUR = [
   },
   {
     step: "plan", target: "#plan-draft", title: "From result to action",
-    text: () => "Swap can draft the best set as a plan for a coordinator and record it in the graph. It stays a draft until a person approves it, and the AI helper has no way to. Press the button to see one.",
+    text: () => "Swap can draft the best set as a plan for a coordinator and record it in the graph. FalkorDB checks the draft before it is saved, and it stays a draft until a person approves it; the AI helper has no way to. Press the button to see one.",
+  },
+  {
+    step: "fail", target: "#fail-title", title: "When a lab test fails",
+    text: () => "After a plan is approved, record a failed crossmatch on one of its links. The graph kills every swap that needed that link, finds the patients left stranded and any 2-way swap still alive inside the broken ring, and the agent drafts a repair for a person to approve.",
   },
   {
     step: "hood", target: "#proof", title: "Can you trust it?",

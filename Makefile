@@ -8,7 +8,7 @@ FAIRNESS_SEEDS ?= 10
 
 export PYTHONPATH := src
 
-.PHONY: up test verify verify-fairness graph-bench run lint docker-up docker-down
+.PHONY: up test verify verify-fairness graph-bench failure-story run lint docker-up docker-down
 
 up:  ## start FalkorDB on 127.0.0.1:16400 (idempotent)
 	@docker inspect swap-falkordb >/dev/null 2>&1 || \
@@ -27,6 +27,9 @@ verify-fairness:  ## priority weighting (weight 1 vs 3) on highly sensitised pat
 
 graph-bench:  ## time the graph work behind the headline loop (N=300, seed 1000, median of 5)
 	$(PY) -m swap.bench
+
+failure-story:  ## replay draft -> approve -> positive crossmatch -> repair on N=200, seed 1000
+	$(PY) -m swap.story
 
 run:
 	$(PY) -m uvicorn swap.api:app --port $(PORT)
