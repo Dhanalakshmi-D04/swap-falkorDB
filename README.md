@@ -36,10 +36,11 @@ Nodes
 - `(:Pair {id, patient_abo, donor_abo, pra, hard})` — one incompatible donor/patient pair. `id` is an integer, `patient_abo`/`donor_abo` ∈ {`O`,`A`,`B`,`AB`}, `pra` ∈ {0.05, 0.45, 0.90}, `hard` = `pra == 0.90`.
 - Flow network so `algo.maxFlow` can run: `(:S)` source, `(:Donor {id})` per pair, `(:Patient {id})` per pair, `(:T)` sink.
 - `(:Altruist {id, donor_abo})` — donor-only node, created only inside a what-if scratch graph, so it can start a chain but never appears in a cycle.
-- `(:Run)`, `(:Finding)` are reserved in the plan and not yet used.
+- `(:Plan {id, status, created_at, max_len, priority, matched, swaps, decided_by, decided_at})` — a drafted swap plan, written by `draft_plan` (status `draft`) and decided by a person (`approved` or `rejected`). It lives in the same graph as the pool, so a new pool replaces its plans.
 
 Relationships
 - `(:Pair)-[:CAN_GIVE]->(:Pair)` — "donor of the left pair can give to patient of the right pair": ABO-compatible **and** the crossmatch passes at the patient's PRA.
+- `(:Plan)-[:PROPOSES {swap, pos}]->(:Pair)` — the pairs of each swap in a plan: `swap` is the swap's index and `pos` its position in the ring (each donor gives to the next position, the last to the first).
 - `(:S)-[:F {cap:1}]->(:Donor)`, `(:Donor)-[:F {cap:1}]->(:Patient)`, `(:Patient)-[:F {cap:1}]->(:T)` — the unit-capacity flow network; `:Altruist` nodes join as a `:Donor`.
 
 Indexes (created before any edges are loaded, `swap/graph.py`):
@@ -101,13 +102,26 @@ MATCH (a:Altruist {id: $id})-[:CAN_GIVE]->(p:Pair) RETURN p.id ORDER BY p.id
 MATCH (a:Altruist {id: $id})-[:CAN_GIVE]->(p1:Pair)-[:CAN_GIVE]->(p2:Pair) WHERE p1.id <> p2.id RETURN p1.id, p2.id ORDER BY p1.id, p2.id
 ```
 
+### The action: draft, then a person decides (`swap/tools.py`)
+`draft_plan` writes the best set back into the graph as a `:Plan` that `PROPOSES` each pair; `get_plan` rebuilds the coordinator packet from what is stored; `decide_plan` (human-only, see below) records the decision; pairs of an *approved* plan are committed and the next draft skips them.
+```
+MATCH (pl:Plan) RETURN coalesce(max(pl.id), 0) + 1
+CREATE (pl:Plan {id: $id, status: 'draft', created_at: $created_at, max_len: $max_len, priority: $priority, matched: $matched, swaps: $swaps}) RETURN pl.id
+UNWIND $rows AS r MATCH (pl:Plan {id: $plan}), (p:Pair {id: r[2]}) CREATE (pl)-[:PROPOSES {swap: r[0], pos: r[1]}]->(p) RETURN count(*)
+MATCH (pl:Plan {id: $id}) RETURN pl.id, pl.status, pl.created_at, pl.max_len, pl.priority, pl.matched, pl.swaps, pl.decided_by, pl.decided_at
+MATCH (pl:Plan {id: $id})-[r:PROPOSES]->(p:Pair) RETURN r.swap, r.pos, p.id, p.patient_abo, p.donor_abo, p.pra, p.hard ORDER BY r.swap, r.pos
+MATCH (pl:Plan {id: $id}) SET pl.status = $status, pl.decided_by = $by, pl.decided_at = $at RETURN pl.id
+MATCH (pl:Plan {status: 'approved'})-[:PROPOSES]->(p:Pair) RETURN DISTINCT p.id ORDER BY p.id
+```
+The approval gate is structural, not a prompt: `decide_plan` exists only behind `POST /plans/{id}/decision` (the web UI). It is not in the agent's tool catalogue and not on the MCP server, and `tests/test_plan.py` fails if it ever appears there. A decision needs a name, is recorded with a timestamp, and can be made once.
+
 ### The solvers (`src/swap/solve.py`)
 FalkorDB supplies the **candidate** cycles and edges; the best disjoint set is chosen by an integer program the agent calls as a tool:
 - **Best set** = vertex-disjoint cycle packing maximising covered patients, `scipy.optimize.milp` (0/1 per candidate cycle, ≤1 cycle per patient).
 - **True unbounded cycle optimum** = maximum cycle cover of any length, which is an **assignment problem with self-loops** (`scipy.optimize.linear_sum_assignment`; the self-loop is "unmatched").
 
 ## The tool catalogue and the four outcomes
-The catalogue is fixed and exposes six tools (plus `generate_pool` on the MCP server). Each is typed; the OpenAI tool-calling schema is generated from the typed signatures (`swap/agent.py`).
+The catalogue is fixed and exposes seven tools to the agent (plus `generate_pool`, `get_plan` and `list_plans` on the MCP server). Each is typed; the OpenAI tool-calling schema is generated from the typed signatures (`swap/agent.py`).
 
 | tool | arguments | what it answers |
 |---|---|---|
@@ -117,6 +131,7 @@ The catalogue is fixed and exposes six tools (plus `generate_pool` on the MCP se
 | `true_cycle_optimum` | — | maximum cycle cover of any length (MILP proof panel) |
 | `explain_unmatched` | `pair_id: int` | who could give to this patient, why others cannot, and the cycles through the pair |
 | `what_if` | `kind`, `donor_abo?`, `pair_id?`, `weight?`, `max_len` | re-run the tools on a modified copy and report the delta |
+| `draft_plan` | `max_len: 2\|3\|4`, `priority?: float` | write the best set into the graph as a **draft** plan (skipping pairs already committed) and return the coordinator packet; it cannot approve |
 
 Every tool returns a four-outcome **envelope** `{outcome, result, path, trace:{tool, args, ms, rows}}` (`swap/envelope.py`):
 

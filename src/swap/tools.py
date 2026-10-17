@@ -12,7 +12,8 @@ Honest framing, in the words the results use:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 from falkordb import FalkorDB, Graph
@@ -93,6 +94,38 @@ CHAIN_TWO = (
     "WHERE p1.id <> p2.id RETURN p1.id, p2.id ORDER BY p1.id, p2.id"
 )
 
+# The action: a drafted plan is written back into the graph as a :Plan node that PROPOSES the pairs
+# of each chosen swap (swap = index of the cycle, pos = position in it). A human decision sets the
+# status; approved plans commit their pairs, and the next draft skips them.
+NEXT_PLAN_ID = "MATCH (pl:Plan) RETURN coalesce(max(pl.id), 0) + 1"
+CREATE_PLAN = (
+    "CREATE (pl:Plan {id: $id, status: 'draft', created_at: $created_at, max_len: $max_len, "
+    "priority: $priority, matched: $matched, swaps: $swaps}) RETURN pl.id"
+)
+ADD_PLAN_STEPS = (
+    "UNWIND $rows AS r MATCH (pl:Plan {id: $plan}), (p:Pair {id: r[2]}) "
+    "CREATE (pl)-[:PROPOSES {swap: r[0], pos: r[1]}]->(p) RETURN count(*)"
+)
+READ_PLAN = (
+    "MATCH (pl:Plan {id: $id}) RETURN pl.id, pl.status, pl.created_at, pl.max_len, pl.priority, "
+    "pl.matched, pl.swaps, pl.decided_by, pl.decided_at"
+)
+READ_PLAN_STEPS = (
+    "MATCH (pl:Plan {id: $id})-[r:PROPOSES]->(p:Pair) "
+    "RETURN r.swap, r.pos, p.id, p.patient_abo, p.donor_abo, p.pra, p.hard ORDER BY r.swap, r.pos"
+)
+LIST_PLANS = (
+    "MATCH (pl:Plan) RETURN pl.id, pl.status, pl.created_at, pl.max_len, pl.matched, pl.swaps, "
+    "pl.decided_by ORDER BY pl.id"
+)
+DECIDE_PLAN = (
+    "MATCH (pl:Plan {id: $id}) SET pl.status = $status, pl.decided_by = $by, pl.decided_at = $at "
+    "RETURN pl.id"
+)
+COMMITTED_PAIR_IDS = (
+    "MATCH (pl:Plan {status: 'approved'})-[:PROPOSES]->(p:Pair) RETURN DISTINCT p.id ORDER BY p.id"
+)
+
 CYPHER: dict[str, str] = {
     "count_pairs": COUNT_PAIRS,
     "hard_pair_ids": HARD_PAIR_IDS,
@@ -108,6 +141,14 @@ CYPHER: dict[str, str] = {
     "altruist_ids": ALTRUIST_IDS,
     "chain_direct": CHAIN_DIRECT,
     "chain_two": CHAIN_TWO,
+    "next_plan_id": NEXT_PLAN_ID,
+    "create_plan": CREATE_PLAN,
+    "add_plan_steps": ADD_PLAN_STEPS,
+    "read_plan": READ_PLAN,
+    "read_plan_steps": READ_PLAN_STEPS,
+    "list_plans": LIST_PLANS,
+    "decide_plan": DECIDE_PLAN,
+    "committed_pair_ids": COMMITTED_PAIR_IDS,
 }
 
 CYCLES_BY_LENGTH = {2: FIND_CYCLES_2, 3: FIND_CYCLES_3, 4: FIND_CYCLES_4}
@@ -116,6 +157,16 @@ FLOW_BOUND_CAVEAT = (
     "upper bound that also allows chains (a matching relaxation), NOT the cycle optimum"
 )
 EMPTY_NOTE = "the graph does not know of any"
+
+PLAN_NOTICE = (
+    "Synthetic patients only. Decision support, not medical advice. A person must approve this "
+    "plan; Swap cannot."
+)
+DECISIONS = {"approve": "approved", "reject": "rejected"}
+
+
+class PlanStateError(ValueError):
+    """A plan decision that is not allowed from the plan's current status (the API answers 409)."""
 
 
 def _rotate_to_min(cycle: list[int]) -> list[int]:
@@ -276,14 +327,26 @@ class SwapTools:
 
     # -- M4 ---------------------------------------------------------------------------------
 
-    def best_set(self, max_len: int = 3, priority: float | None = None) -> dict[str, Any]:
-        """Vertex-disjoint packing of the graph's candidate cycles (and altruist chains)."""
+    def best_set(
+        self,
+        max_len: int = 3,
+        priority: float | None = None,
+        exclude: Collection[int] = (),
+    ) -> dict[str, Any]:
+        """Vertex-disjoint packing of the graph's candidate cycles (and altruist chains).
+
+        `exclude` drops every candidate cycle that touches one of those pair ids (used to plan
+        around pairs already committed by an approved plan).
+        """
         timer = Timer()
         weight = 1.0 if priority is None else float(priority)
         args = {"max_len": max_len, "priority": priority}
 
         found = self.find_cycles(max_len)
         cycles = found["result"]["cycles"]
+        if exclude:
+            skip = {int(value) for value in exclude}
+            cycles = [cycle for cycle in cycles if skip.isdisjoint(cycle)]
         chains, chain_groups = self._chain_candidates()
         hard_ids = self.hard_pair_ids()
         # Chains are columns len(cycles).. in the combined candidate list; shift their groups.
@@ -371,6 +434,215 @@ class SwapTools:
             if len(chains) > start:
                 groups.append(list(range(start, len(chains))))
         return chains, groups
+
+    # -- the action: draft a plan, a human decides --------------------------------------------
+
+    def committed_pair_ids(self) -> list[int]:
+        """Pairs that an approved plan has committed (read from the graph)."""
+        return [int(row[0]) for row in self.graph.query(COMMITTED_PAIR_IDS).result_set]
+
+    def draft_plan(self, max_len: int = 3, priority: float | None = None) -> dict[str, Any]:
+        """Draft a swap plan from the best set and record it in the graph with status `draft`.
+
+        Pairs already committed by an approved plan are skipped. The plan stays a draft until a
+        person approves it; there is no tool for that, on purpose.
+        """
+        timer = Timer()
+        committed = self.committed_pair_ids()
+        best = self.best_set(max_len, priority, exclude=committed)
+        cycles = best["result"]["cycles"]
+        args = {"max_len": max_len, "priority": priority}
+        if not cycles:
+            timer.stop(0)
+            result = {
+                "plan": None,
+                "note": f"{EMPTY_NOTE} swap to plan among the pairs not already committed",
+                "excluded_committed": len(committed),
+            }
+            return envelope(
+                Outcome.NOT_IN_GRAPH, result, (), trace=build_trace("draft_plan", args, timer)
+            )
+
+        plan_id = int(self.graph.query(NEXT_PLAN_ID).result_set[0][0])
+        self.graph.query(
+            CREATE_PLAN,
+            {
+                "id": plan_id,
+                "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "max_len": max_len,
+                "priority": 1.0 if priority is None else float(priority),
+                "matched": best["result"]["matched"],
+                "swaps": len(cycles),
+            },
+        )
+        rows = [[i, pos, pair] for i, cycle in enumerate(cycles) for pos, pair in enumerate(cycle)]
+        written = self.graph.query(ADD_PLAN_STEPS, {"plan": plan_id, "rows": rows}).result_set
+        if int(written[0][0]) != len(rows):
+            raise RuntimeError(f"plan {plan_id}: wrote {written[0][0]} of {len(rows)} steps")
+        timer.stop(len(rows) + 2)
+        packet = self._packet(plan_id, excluded_committed=len(committed))
+        packet["note"] = "the plan is a draft in the graph; a person has to approve it"
+        return envelope(
+            Outcome.ANSWERED_WITH_PATH,
+            packet,
+            cycles,
+            trace=build_trace("draft_plan", args, timer),
+        )
+
+    def get_plan(self, plan_id: Any) -> dict[str, Any]:
+        """Read a plan (and its swaps) back out of the graph; an unknown id is `unknown_entity`."""
+        timer = Timer()
+        args = {"plan_id": plan_id}
+        try:
+            packet = self._packet(self._plan_id(plan_id))
+        except UnknownEntity as exc:
+            return self._unknown_plan(timer, args, exc, "get_plan")
+        timer.stop(sum(len(swap["pairs"]) for swap in packet["swaps"]) + 1)
+        cycles = [swap["pairs"] for swap in packet["swaps"]]
+        return envelope(
+            Outcome.ANSWERED_WITH_PATH, packet, cycles, trace=build_trace("get_plan", args, timer)
+        )
+
+    def list_plans(self) -> dict[str, Any]:
+        """Every plan in the graph with its status, plus the pairs approved plans have committed."""
+        timer = Timer()
+        rows = self.graph.query(LIST_PLANS).result_set
+        plans = [
+            {
+                "id": int(r[0]),
+                "status": str(r[1]),
+                "created_at": str(r[2]),
+                "max_len": int(r[3]),
+                "matched": int(r[4]),
+                "swaps": int(r[5]),
+                "decided_by": r[6],
+            }
+            for r in rows
+        ]
+        committed = self.committed_pair_ids()
+        timer.stop(len(plans))
+        result: dict[str, Any] = {"plans": plans, "committed": committed}
+        trace = build_trace("list_plans", {}, timer)
+        if not plans:
+            result["note"] = f"{EMPTY_NOTE} plan in this graph yet"
+            return envelope(Outcome.NOT_IN_GRAPH, result, (), trace=trace)
+        return envelope(Outcome.ANSWERED_WITH_PATH, result, (), trace=trace)
+
+    def decide_plan(self, plan_id: Any, decision: str, decided_by: str) -> dict[str, Any]:
+        """HUMAN-ONLY: approve or reject a draft plan. Not in the agent catalogue or the MCP server.
+
+        Records who decided and when. Only a `draft` can be decided, once.
+        """
+        timer = Timer()
+        args = {"plan_id": plan_id, "decision": decision, "decided_by": decided_by}
+        if decision not in DECISIONS:
+            raise ValueError(f"decision must be one of {sorted(DECISIONS)}, got {decision!r}")
+        who = " ".join(str(decided_by).split())
+        if not who or len(who) > 80:
+            raise ValueError("decided_by must be a name of 1 to 80 characters")
+        try:
+            pid = self._plan_id(plan_id)
+            status = str(self._read_plan_row(pid)[1])
+        except UnknownEntity as exc:
+            return self._unknown_plan(timer, args, exc, "decide_plan")
+        if status != "draft":
+            raise PlanStateError(f"plan {pid} is already {status}; only a draft can be decided")
+        self.graph.query(
+            DECIDE_PLAN,
+            {
+                "id": pid,
+                "status": DECISIONS[decision],
+                "by": who,
+                "at": datetime.now(UTC).isoformat(timespec="seconds"),
+            },
+        )
+        packet = self._packet(pid)
+        timer.stop(2)
+        cycles = [swap["pairs"] for swap in packet["swaps"]]
+        trace = build_trace("decide_plan", {**args, "decided_by": who}, timer)
+        return envelope(Outcome.ANSWERED_WITH_PATH, packet, cycles, trace=trace)
+
+    def _plan_id(self, plan_id: Any) -> int:
+        try:
+            return int(plan_id)
+        except (TypeError, ValueError):
+            raise UnknownEntity("Plan", plan_id) from None
+
+    def _read_plan_row(self, plan_id: int) -> list[Any]:
+        rows = self.graph.query(READ_PLAN, {"id": plan_id}).result_set
+        if not rows:
+            raise UnknownEntity("Plan", plan_id)
+        return list(rows[0])
+
+    def _unknown_plan(
+        self, timer: Timer, args: dict[str, Any], exc: UnknownEntity, tool: str
+    ) -> dict[str, Any]:
+        timer.stop(0)
+        result = {"message": str(exc), "entity": {"kind": exc.kind, "id": exc.entity_id}}
+        return envelope(
+            Outcome.UNKNOWN_ENTITY, result, (), trace=build_trace(tool, args, timer)
+        )
+
+    def _packet(self, plan_id: int, excluded_committed: int | None = None) -> dict[str, Any]:
+        """The coordinator packet for one plan, rebuilt from what the graph stores."""
+        row = self._read_plan_row(plan_id)
+        steps = self.graph.query(READ_PLAN_STEPS, {"id": plan_id}).result_set
+        by_swap: dict[int, list[Any]] = {}
+        for swap, _pos, pair, patient_abo, donor_abo, pra, hard in steps:
+            by_swap.setdefault(int(swap), []).append((int(pair), patient_abo, donor_abo, pra, hard))
+
+        swaps = []
+        hard_matched = 0
+        for index in sorted(by_swap):
+            members = by_swap[index]
+            hard_matched += sum(1 for member in members if member[4])
+            pairs = [member[0] for member in members]
+            swaps.append(
+                {
+                    "index": index + 1,
+                    "size": len(members),
+                    "pairs": pairs,
+                    "steps": [
+                        {
+                            "donor_pair": members[i][0],
+                            "donor_abo": members[i][2],
+                            "patient_pair": members[(i + 1) % len(members)][0],
+                            "patient_abo": members[(i + 1) % len(members)][1],
+                        }
+                        for i in range(len(members))
+                    ],
+                }
+            )
+        n_pairs = self.n_pairs()
+        matched = int(row[5])
+        status = str(row[1])
+        plan = {
+            "id": int(row[0]),
+            "status": status,
+            "created_at": str(row[2]),
+            "max_len": int(row[3]),
+            "priority": float(row[4]),
+            "matched": matched,
+            "swaps": int(row[6]),
+            "decided_by": row[7],
+            "decided_at": row[8],
+        }
+        summary = {
+            "pairs_in_pool": n_pairs,
+            "matched": matched,
+            "not_in_plan": n_pairs - matched,
+            "hard_total": len(self.hard_pair_ids()),
+            "hard_matched": hard_matched,
+        }
+        if excluded_committed is not None:
+            summary["excluded_committed"] = excluded_committed
+        return {
+            "plan": plan,
+            "swaps": swaps,
+            "summary": summary,
+            "requires_human_approval": status == "draft",
+            "notice": PLAN_NOTICE,
+        }
 
     # -- graph reads the tools need ---------------------------------------------------------
 

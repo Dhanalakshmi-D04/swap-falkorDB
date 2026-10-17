@@ -33,6 +33,7 @@ TOOL_ORDER: tuple[str, ...] = (
     "true_cycle_optimum",
     "explain_unmatched",
     "what_if",
+    "draft_plan",
 )
 
 MODE_LLM = "llm"
@@ -156,6 +157,16 @@ class ToolCatalogue:
         if weight is not None:
             args["weight"] = float(weight)
         return self.tools.what_if(kind, args)
+
+    def draft_plan(
+        self, max_len: Literal[2, 3, 4] = 3, priority: float | None = None
+    ) -> dict[str, Any]:
+        """Draft a swap plan for a coordinator and record it in the graph as a DRAFT.
+
+        Skips pairs already committed by an approved plan. You can only draft: approving or
+        rejecting a plan is a human action you cannot perform.
+        """
+        return self.tools.draft_plan(int(max_len), priority)
 
     def dispatch(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         """Execute one tool by name with already-parsed arguments."""
@@ -365,6 +376,8 @@ def route(question: str) -> list[tuple[str, dict[str, Any]]]:
 
     if pair_id is not None and any(word in text for word in ("explain", "why", "unmatched")):
         return [("explain_unmatched", {"pair_id": pair_id})]
+    if any(word in text for word in ("draft", "sign-off", "sign off", "signoff")):
+        return [("draft_plan", {"max_len": max_len})]
     if any(word in text for word in ("bound", "flow", "maxflow", "max flow")):
         return [("flow_bound", {})]
     if any(word in text for word in ("what if", "what-if", "whatif", "altruist", "remove", "priorit")):
@@ -425,6 +438,15 @@ def summarize(name: str, env: dict[str, Any]) -> str:
             f"pair {pair.get('id')} (patient {pair.get('patient_abo')}, donor "
             f"{pair.get('donor_abo')}): donors that could give to this patient are {incoming}; "
             f"this pair's donor could give to {outgoing}. Outcome: {outcome}."
+        )
+    if name == "draft_plan":
+        plan = result.get("plan") or {}
+        if not plan:
+            return f"there is nothing left to plan: {result.get('note', '')}. Outcome: {outcome}."
+        return (
+            f"drafted plan {plan.get('id')}: {plan.get('swaps')} swaps covering "
+            f"{plan.get('matched')} patients. It is only a draft until a person approves it. "
+            f"Outcome: {outcome}."
         )
     if name == "what_if":
         before = (result.get("before") or {}).get("matched")

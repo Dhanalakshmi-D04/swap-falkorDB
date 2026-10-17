@@ -25,6 +25,9 @@ CATALOGUE = {
     "true_cycle_optimum",
     "explain_unmatched",
     "what_if",
+    "draft_plan",
+    "get_plan",
+    "list_plans",
 }
 VALID = {outcome.value for outcome in Outcome}
 

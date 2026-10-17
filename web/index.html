@@ -31,7 +31,8 @@
           <li><a href="#/results" data-step="results"><span class="stepper-num">2</span><span class="stepper-label">Results</span></a></li>
           <li><a href="#/leftout" data-step="leftout"><span class="stepper-num">3</span><span class="stepper-label">Left out</span></a></li>
           <li><a href="#/whatif" data-step="whatif"><span class="stepper-num">4</span><span class="stepper-label">What if?</span></a></li>
-          <li><a href="#/hood" data-step="hood"><span class="stepper-num">5</span><span class="stepper-label">Proof</span></a></li>
+          <li><a href="#/plan" data-step="plan"><span class="stepper-num">5</span><span class="stepper-label">Plan</span></a></li>
+          <li><a href="#/hood" data-step="hood"><span class="stepper-num">6</span><span class="stepper-label">Proof</span></a></li>
         </ol>
       </nav>
       <div class="topbar-actions">
@@ -74,6 +75,10 @@
           <li>
             <h3>It never guesses.</h3>
             <p>Every answer carries its evidence. If the graph has nothing, it says <q>the graph doesn't know</q>, never "safe". The AI helper can only choose from fixed, human-written queries.</p>
+          </li>
+          <li>
+            <h3>It proposes. People decide.</h3>
+            <p>Swap drafts the plan and records it in the graph. Only a person can approve it, and the AI helper has no way to.</p>
           </li>
           <li>
             <h3>It checks itself.</h3>
@@ -253,7 +258,31 @@
       </div>
     </section>
 
-    <!-- STEP 5: PROOF ---------------------------------------------------------- -->
+    <!-- STEP 5: PLAN ----------------------------------------------------------- -->
+    <section class="panel" data-panel="plan" aria-labelledby="plan-title" hidden>
+      <div id="plan" class="block">
+        <h2 id="plan-title">From result to action</h2>
+        <p class="block-sub">
+          Swap can turn the best set into a plan for a coordinator, and record it in the graph.
+          It only ever <strong>drafts</strong>. A person has to approve it, and the AI helper cannot.
+        </p>
+
+        <div class="plan-actions">
+          <button type="button" id="plan-draft" class="btn btn-primary btn-lg">Draft the plan</button>
+          <p class="muted small" id="plan-scope">Uses the swap length and priority chosen on the other steps.</p>
+        </div>
+        <div id="plan-status" class="status" role="status"></div>
+
+        <article id="plan-sheet" class="sheet" aria-live="polite" hidden></article>
+
+        <div id="plan-ledger-wrap" class="ledger-wrap" hidden>
+          <h3 class="kicker">Plans recorded in the graph</h3>
+          <ul id="plan-ledger" class="ledger"></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 6: PROOF ---------------------------------------------------------- -->
     <section class="panel" data-panel="hood" aria-labelledby="hood-title" hidden>
       <div id="hood" class="block">
         <h2 id="hood-title">Can you trust it?</h2>

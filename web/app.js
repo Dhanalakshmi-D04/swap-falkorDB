@@ -274,6 +274,7 @@ const STEPS = [
   { id: "results", label: "Results" },
   { id: "leftout", label: "Left out" },
   { id: "whatif", label: "What if?" },
+  { id: "plan", label: "Plan" },
   { id: "hood", label: "Proof" },
 ];
 
@@ -285,6 +286,8 @@ const state = {
   priorityOn: false,
   priorityWeight: 3,
   hardMark: false,
+  committed: new Set(),
+  planId: null,
   nodes: [],
   nodesById: {},
   counts: null,
@@ -381,6 +384,7 @@ function enterStep(id) {
   if (id === "results" || id === "leftout") renderDetails();
   if (id === "leftout") renderLeftout();
   if (id === "whatif") compareFairness();
+  if (id === "plan") loadPlans();
   if (id === "hood") {
     loadProof();
     loadTrace();
@@ -542,6 +546,9 @@ async function loadPool(options) {
     state.explained = {};
     state.proofStale = true;
     state.selected = null;
+    state.committed = new Set();
+    state.planId = null;
+    resetPlanSheet();
     if (!state.priorityOn) state.plans[planKey(2)] = makePlan(graph.chosen || [], []);
     await Promise.all([fetchPlan(2), fetchPlan(3)]);
     if (token !== state.token) return;
@@ -553,6 +560,7 @@ async function loadPool(options) {
     hideMapLoading();
     buildMap();
     renderAll();
+    loadPlans();
     if (state.step === "hood") { loadProof(); loadTrace(); }
   } catch (err) {
     if (token !== state.token) return;
@@ -574,6 +582,7 @@ function renderAll() {
   renderDetails();
   renderFairnessLive();
   renderHeroLive();
+  $("plan-scope").textContent = planScopeText();
   const pool = state.counts || {};
   $("pool-line").textContent = `${pool.nodes ?? "?"} pairs · ${pool.edges ?? "?"} "can give to" links · ${hardNodes().length} hard to match`;
   setStatus($("result-status"), state.priorityOn ? "Priority for hard-to-match patients is on." : "");
@@ -634,7 +643,7 @@ function swapSize(id) {
 function dotText(id) {
   const node = state.nodesById[id] || {};
   const kind = dotKind(id);
-  const head = `Pair ${id}: patient ${abo(node.patient_abo)}, donor ${abo(node.donor_abo)}`;
+  const head = `Pair ${id}: patient ${abo(node.patient_abo)}, donor ${abo(node.donor_abo)}${state.committed.has(id) ? ", committed in an approved plan" : ""}`;
   if (kind === "kept") return `${head}. Gets a kidney in a ${swapSize(id)}-way swap.`;
   if (kind === "gain") return `${head}. Gets a kidney in a ${swapSize(id)}-way swap, only because 3-way swaps are allowed.`;
   if (kind === "maybe") return `${head}. Left out with 2-way swaps, but would get a kidney if 3-way swaps were allowed.`;
@@ -667,6 +676,7 @@ function paintMap() {
     const text = dotText(id);
     dot.className = `dot dot-${dotKind(id)}`;
     if (hard && node.hard) dot.classList.add("is-hard");
+    if (state.committed.has(id)) dot.classList.add("is-committed");
     if (sel === id) dot.classList.add("is-selected");
     else if (mates.has(id)) dot.classList.add("is-mate");
     dot.setAttribute("aria-label", text);
@@ -685,6 +695,7 @@ function renderLegend() {
     host.append(el("li", {}, el("span", { class: `dot dot-${kind} dot-legend`, "aria-hidden": "true" }), text));
   }
   if (state.hardMark) host.append(el("li", {}, el("span", { class: "dot dot-out is-hard dot-legend", "aria-hidden": "true" }), "Ringed: hard to match"));
+  if (state.committed.size) host.append(el("li", {}, el("span", { class: "dot dot-kept is-committed dot-legend", "aria-hidden": "true" }), "Committed in an approved plan"));
   $$(".seg").forEach((button) => {
     const on = Number(button.dataset.len) === state.maxLen;
     button.classList.toggle("is-active", on);
@@ -887,6 +898,9 @@ function renderMatchedDetail(host, id, cycle) {
   cycle.forEach((_, i) => list.append(el("li", {}, cycleStepText(cycle, i))));
   host.append(list);
   host.append(el("p", { class: "fine-print", text: "Each ✓ is a donor-to-patient link the graph holds. Everyone in the ring gives and receives." }));
+  if (state.committed.has(id)) {
+    host.append(el("p", { class: "fine-print" }, strong("Committed: "), "this pair is in an approved plan, recorded in the graph. ", el("a", { href: "#/plan", text: "See the plan" }), "."));
+  }
   if (onlyBecause3) {
     host.append(el("div", { class: "callout callout-good" }, strong("Only found because 3-way swaps are allowed."), " In the best 2-way-only plan, this pair is left out."));
   }
@@ -1285,6 +1299,157 @@ function renderFairnessPanel() {
   host.append(el("p", { class: "fine-print", text: "Run with make verify-fairness. Priority lifted the hard-to-match share by 20.3 ± 7.1 points (better on 20 of 20 pools) and cost 1.0 matched patient on average. Quoted from the README." }));
 }
 
+/* ------------------------------------------------------------- step 5: plan (the action) */
+
+function resetPlanSheet() {
+  $("plan-sheet").hidden = true;
+  clear($("plan-sheet"));
+  $("plan-ledger-wrap").hidden = true;
+  setStatus($("plan-status"), "");
+}
+
+function planScopeText() {
+  const priority = state.priorityOn ? ` Hard-to-match patients count ${state.priorityWeight}×.` : "";
+  const committed = state.committed.size ? ` ${state.committed.size} pairs already committed by an approved plan are skipped.` : "";
+  return `Swaps of up to ${state.maxLen} pairs.${priority}${committed}`;
+}
+
+async function loadPlans() {
+  $("plan-scope").textContent = planScopeText();
+  if (!state.ready) return;
+  let env;
+  try {
+    env = await api("/plans");
+  } catch (err) {
+    setStatus($("plan-status"), err.message, "bad");
+    return;
+  }
+  const result = env.result || {};
+  state.committed = new Set((result.committed || []).map(Number));
+  $("plan-scope").textContent = planScopeText();
+  renderLedger(result.plans || []);
+  paintMap();
+  renderLegend();
+}
+
+function renderLedger(plans) {
+  const list = $("plan-ledger");
+  clear(list);
+  $("plan-ledger-wrap").hidden = !plans.length;
+  for (const p of [...plans].reverse()) {
+    const who = p.decided_by ? ` by ${p.decided_by}` : "";
+    list.append(el("li", {}, el("button", { type: "button", class: `ledger-row${p.id === state.planId ? " is-selected" : ""}`, onclick: () => openPlan(p.id) },
+      el("span", { class: "ledger-id", text: `Plan ${p.id}` }),
+      statusBadge(p.status),
+      el("span", { class: "muted small", text: `${p.swaps} swaps · ${p.matched} patients${who}` }))));
+  }
+}
+
+function statusBadge(status) {
+  const map = { draft: ["warn", "Draft, not approved"], approved: ["ok", "Approved"], rejected: ["bad", "Rejected"] };
+  const [tone, label] = map[status] || ["muted", status];
+  return el("span", { class: `badge badge-${tone}`, text: label });
+}
+
+async function draftPlan() {
+  const button = $("plan-draft");
+  setStatus($("plan-status"), "");
+  const body = { max_len: state.maxLen, priority: state.priorityOn ? state.priorityWeight : null };
+  let env;
+  try {
+    env = await withBusy(button, "Drafting…", () => api("/tools/draft_plan", postJson(body)));
+  } catch (err) {
+    setStatus($("plan-status"), err.message, "bad");
+    return;
+  }
+  if (env.outcome !== "answered_with_path") {
+    $("plan-sheet").hidden = true;
+    setStatus($("plan-status"), `Nothing to draft: ${env.result.note || "the graph knows of no swap among the pairs not already committed."}`, "muted");
+    await loadPlans();
+    return;
+  }
+  state.planId = env.result.plan.id;
+  renderPlan(env.result);
+  await loadPlans();
+}
+
+async function openPlan(id) {
+  setStatus($("plan-status"), "");
+  try {
+    const env = await api(`/plans/${encodeURIComponent(id)}`);
+    if (env.outcome === "unknown_entity") { setStatus($("plan-status"), env.result.message, "bad"); return; }
+    state.planId = id;
+    renderPlan(env.result);
+    renderLedger((await api("/plans")).result.plans || []);
+  } catch (err) {
+    setStatus($("plan-status"), err.message, "bad");
+  }
+}
+
+function renderPlan(packet) {
+  const sheet = $("plan-sheet");
+  clear(sheet);
+  const plan = packet.plan;
+  const sum = packet.summary;
+  sheet.hidden = false;
+
+  sheet.append(el("div", { class: "sheet-head" },
+    el("div", {}, el("h3", { text: `Swap plan ${plan.id}` }),
+      el("p", { class: "muted small", text: `Prepared ${new Date(plan.created_at).toLocaleString()} · swaps of up to ${plan.max_len} pairs` })),
+    statusBadge(plan.status)));
+
+  sheet.append(el("div", { class: "sheet-facts" },
+    el("p", {}, strong(`${sum.matched} of ${sum.pairs_in_pool}`), " patients covered, in ", strong(plan.swaps), ` ${plural(plan.swaps, "swap")}`),
+    el("p", {}, strong(`${sum.hard_matched} of ${sum.hard_total}`), " hard-to-match patients covered"),
+    sum.excluded_committed ? el("p", { class: "muted small", text: `Skipped ${sum.excluded_committed} pairs already committed by an approved plan.` }) : null));
+
+  const swaps = el("ol", { class: "sheet-swaps" });
+  for (const swap of packet.swaps) {
+    swaps.append(el("li", {},
+      el("p", { class: "sheet-swap-title" }, strong(`Swap ${swap.index}`), el("span", { class: "muted small", text: ` ${swap.size}-way` })),
+      el("ul", {}, swap.steps.map((step) => el("li", {}, strong(`Pair ${step.donor_pair}`), `'s donor (type ${abo(step.donor_abo)}) gives to `, strong(`Pair ${step.patient_pair}`), `'s patient (type ${abo(step.patient_abo)})`)))));
+  }
+  sheet.append(swaps);
+
+  sheet.append(approvalBlock(packet));
+  sheet.append(el("p", { class: "fine-print", text: packet.notice }));
+  sheet.append(el("p", {}, el("a", { class: "btn btn-sm", href: `/plans/${plan.id}/packet.md`, download: `swap-plan-${plan.id}.md`, text: "Download the packet (.md)" })));
+}
+
+function approvalBlock(packet) {
+  const plan = packet.plan;
+  if (plan.status !== "draft") {
+    const verb = plan.status === "approved" ? "Approved" : "Rejected";
+    const note = plan.status === "approved" ? "Its pairs are now committed in the graph and skipped by later drafts." : "Nothing was committed.";
+    return el("div", { class: `decision decision-${plan.status}` },
+      el("p", {}, strong(`${verb} by ${plan.decided_by}`), ` on ${new Date(plan.decided_at).toLocaleString()}.`),
+      el("p", { class: "small muted", text: `${note} The decision is recorded on the plan in the graph.` }));
+  }
+  const input = el("input", { type: "text", id: "plan-by", maxlength: "80", placeholder: "Your name", autocomplete: "name", "aria-label": "Your name" });
+  const message = el("p", { class: "status status-bad", role: "alert", hidden: true });
+  const decide = (decision) => async (event) => {
+    const who = input.value.trim();
+    if (!who) { message.hidden = false; message.textContent = "Type your name first. A person has to take responsibility for this decision."; input.focus(); return; }
+    message.hidden = true;
+    const button = event.currentTarget;
+    try {
+      const env = await withBusy(button, decision === "approve" ? "Approving…" : "Rejecting…", () => api(`/plans/${plan.id}/decision`, postJson({ decision, decided_by: who })));
+      renderPlan(env.result);
+      await loadPlans();
+    } catch (err) {
+      message.hidden = false;
+      message.textContent = err.message;
+    }
+  };
+  return el("div", { class: "decision" },
+    el("h4", { text: "A person decides" }),
+    el("p", { class: "small muted", text: "Swap cannot approve its own plan. Your name and the time are recorded on the plan in the graph." }),
+    el("div", { class: "decision-row" }, input,
+      el("button", { type: "button", class: "btn btn-primary", text: "Approve", onclick: decide("approve") }),
+      el("button", { type: "button", class: "btn", text: "Reject", onclick: decide("reject") })),
+    message);
+}
+
 /* ------------------------------------------------------- step 5: behind the scenes */
 
 async function loadTrace() {
@@ -1440,6 +1605,7 @@ function buildAskChips() {
     "explain pair 17",
     "what is the max-flow bound?",
     "what if we add an altruistic O donor?",
+    "draft a plan for sign-off",
   ];
   for (const q of questions) host.append(el("button", { type: "button", class: "chip", text: q, onclick: () => askAgent(q) }));
 }
@@ -1535,6 +1701,7 @@ async function setLen(len) {
   populateRemoveChoices();
   renderDetails();
   renderFairnessLive();
+  $("plan-scope").textContent = planScopeText();
 }
 
 /* ----------------------------------------------------------------- guided tour */
@@ -1578,6 +1745,10 @@ const TOUR = [
     step: "whatif", target: "#whatif-altruist-card", title: "What if…?",
     text: () => "Try a change on a copy of the pool. Here, one extra donor with no patient of their own joins, and Swap shows how many more people can be helped.",
     run: async () => { await runAltruist(); },
+  },
+  {
+    step: "plan", target: "#plan-draft", title: "From result to action",
+    text: () => "Swap can draft the best set as a plan for a coordinator and record it in the graph. It stays a draft until a person approves it, and the AI helper has no way to. Press the button to see one.",
   },
   {
     step: "hood", target: "#proof", title: "Can you trust it?",
@@ -1696,6 +1867,7 @@ function wire() {
     runRemove(id, $("whatif-random"));
   });
   $("fairness").addEventListener("change", () => setFairness($("fairness").checked));
+  $("plan-draft").addEventListener("click", draftPlan);
 
   $("trace-refresh").addEventListener("click", loadTrace);
   $("ask-agent").addEventListener("click", () => withBusy($("ask-agent"), "Asking…", () => askAgent()));

@@ -16,7 +16,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -26,8 +27,9 @@ from swap.config import DEFAULT_ACTIVE_GRAPH
 from swap.generator import generate_pool as draw_pool
 from swap.graph import CYPHER as LOADER_CYPHER
 from swap.graph import connect, graph_counts, load_pool, pool_from_graph
+from swap.plan import render_packet_markdown
 from swap.tools import CYPHER as TOOL_CYPHER
-from swap.tools import SwapTools
+from swap.tools import PlanStateError, SwapTools
 
 ACTIVE_GRAPH = DEFAULT_ACTIVE_GRAPH
 TRACE_LIMIT = 200
@@ -105,6 +107,16 @@ class WhatIfRequest(BaseModel):
     max_len: int = Field(default=3, ge=2, le=4)
 
 
+class PlanRequest(BaseModel):
+    max_len: int = Field(default=3, ge=2, le=4)
+    priority: float | None = Field(default=None, gt=0)
+
+
+class DecisionRequest(BaseModel):
+    decision: Literal["approve", "reject"]
+    decided_by: str = Field(min_length=1, max_length=80, description="the person deciding")
+
+
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=500, description="a question in plain English")
 
@@ -150,6 +162,46 @@ def what_if(request: WhatIfRequest) -> dict[str, Any]:
     args = request.model_dump(exclude_none=True)
     kind = args.pop("kind")
     return _record(_tools().what_if(kind, args))
+
+
+@app.post("/tools/draft_plan")
+def draft_plan(request: PlanRequest) -> dict[str, Any]:
+    """Draft a swap plan from the best set and record it in the graph as a draft."""
+    return _record(_tools().draft_plan(request.max_len, request.priority))
+
+
+@app.get("/plans")
+def plans() -> dict[str, Any]:
+    """Every plan in the graph, and the pairs that approved plans have committed."""
+    return _record(_tools().list_plans())
+
+
+@app.get("/plans/{plan_id}")
+def plan(plan_id: int) -> dict[str, Any]:
+    """One plan with its swaps, read back out of the graph."""
+    return _record(_tools().get_plan(plan_id))
+
+
+@app.post("/plans/{plan_id}/decision")
+def decide_plan(plan_id: int, request: DecisionRequest) -> dict[str, Any]:
+    """HUMAN-ONLY: approve or reject a draft. The agent and the MCP server have no such tool."""
+    try:
+        return _record(_tools().decide_plan(plan_id, request.decision, request.decided_by))
+    except PlanStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/plans/{plan_id}/packet.md")
+def plan_packet(plan_id: int) -> PlainTextResponse:
+    """The coordinator packet for a plan, as a Markdown download."""
+    env = _record(_tools().get_plan(plan_id))
+    if env["outcome"] == "unknown_entity":
+        raise HTTPException(status_code=404, detail=env["result"]["message"])
+    return PlainTextResponse(
+        render_packet_markdown(env["result"]),
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="swap-plan-{plan_id}.md"'},
+    )
 
 
 @app.post("/ask")
@@ -257,6 +309,7 @@ def graph_view(max_len: int = Query(3, ge=2, le=4)) -> dict[str, Any]:
         "nodes": nodes,
         "edges": edges,
         "chosen": chosen,
+        "committed": tools.committed_pair_ids(),
         "counts": graph_counts(tools.graph),
         "edge_count": len(pool.edges),
         "truncated": truncated,

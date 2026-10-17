@@ -191,3 +191,46 @@ def test_startup_loads_a_default_pool_when_the_graph_is_missing() -> None:
         assert second["reason"] == "graph already exists"
     finally:
         drop_graph(db, name)
+
+
+def test_plan_lifecycle_over_http(client: TestClient) -> None:
+    _load_pool(client, n=60, seed=3)
+
+    drafted = client.post("/tools/draft_plan", json={"max_len": 3})
+    assert drafted.status_code == 200
+    env = drafted.json()
+    assert set(env) == ENVELOPE_KEYS
+    plan = env["result"]["plan"]
+    assert plan["status"] == "draft" and env["result"]["requires_human_approval"] is True
+
+    packet = client.get(f"/plans/{plan['id']}/packet.md")
+    assert packet.status_code == 200
+    assert "attachment" in packet.headers["content-disposition"]
+    assert "DRAFT" in packet.text and "not medical advice" in packet.text.lower()
+
+    assert client.get("/plans").json()["result"]["plans"][0]["status"] == "draft"
+    assert client.get("/graph", params={"max_len": 2}).json()["committed"] == []
+
+    decided = client.post(f"/plans/{plan['id']}/decision", json={"decision": "approve", "decided_by": "Dr Rao"})
+    assert decided.status_code == 200
+    assert decided.json()["result"]["plan"]["decided_by"] == "Dr Rao"
+    assert client.get("/graph", params={"max_len": 2}).json()["committed"]
+    assert "**Approved** by Dr Rao" in client.get(f"/plans/{plan['id']}/packet.md").text
+
+    again = client.post(f"/plans/{plan['id']}/decision", json={"decision": "reject", "decided_by": "Someone"})
+    assert again.status_code == 409
+
+
+def test_plan_requests_are_validated_and_unknown_plans_are_honest(client: TestClient) -> None:
+    _load_pool(client, n=30, seed=1)
+    assert client.post("/tools/draft_plan", json={"max_len": 9}).status_code == 422
+    assert client.post("/plans/1/decision", json={"decision": "approve", "decided_by": ""}).status_code == 422
+    assert client.post("/plans/1/decision", json={"decision": "maybe", "decided_by": "x"}).status_code == 422
+
+    missing = client.get("/plans/4242")
+    assert missing.status_code == 200
+    assert missing.json()["outcome"] == Outcome.UNKNOWN_ENTITY.value
+    assert client.get("/plans/4242/packet.md").status_code == 404
+    unknown = client.post("/plans/4242/decision", json={"decision": "approve", "decided_by": "x"})
+    assert unknown.status_code == 200
+    assert unknown.json()["outcome"] == Outcome.UNKNOWN_ENTITY.value

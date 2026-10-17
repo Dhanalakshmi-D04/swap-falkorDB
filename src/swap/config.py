@@ -10,7 +10,8 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 16400
 DEFAULT_GRAPH = "swap"
 #: The graph a session's tools answer over: `generate_pool`/`POST /pool` load it, everything else reads it.
-DEFAULT_ACTIVE_GRAPH = "pool"
+#: `SWAP_ACTIVE_GRAPH` overrides the name (the test suite sets it so it never touches the live pool).
+DEFAULT_ACTIVE_GRAPH = os.environ.get("SWAP_ACTIVE_GRAPH", "").strip() or "pool"
 
 #: Any OpenAI-compatible endpoint. All three must be set for the agent loop to call a model;
 #: with any of them empty `run_agent` falls back to the deterministic tool mode.

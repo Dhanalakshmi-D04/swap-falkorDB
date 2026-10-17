@@ -28,7 +28,8 @@ INSTRUCTIONS = (
     "(swaps FalkorDB finds), flow_bound (an upper bound that also allows chains), best_set "
     "(vertex-disjoint packing of the graph's cycles), true_cycle_optimum (any cycle length), "
     "explain_unmatched (who could give to a patient, and why others cannot), what_if (add an "
-    "altruistic donor, remove a pair, or set a priority). Every tool returns {outcome, result, "
+    "altruistic donor, remove a pair, or set a priority), draft_plan (record a DRAFT plan in the graph; "
+    "only a person can approve it, there is no tool for that), get_plan and list_plans. Every tool returns {outcome, result, "
     "path, trace}; an empty traversal means the graph does not know the answer, not that it is safe."
 )
 
@@ -137,6 +138,28 @@ def what_if(
     if weight is not None:
         args["weight"] = weight
     return _tools().what_if(kind, args)
+
+
+@mcp.tool()
+def draft_plan(max_len: Literal[2, 3, 4] = 3, priority: float | None = None) -> dict[str, Any]:
+    """Draft a swap plan from the best set and record it in the graph as a DRAFT.
+
+    Skips pairs already committed by an approved plan. Approving or rejecting a plan is a human
+    action and is deliberately not available as a tool.
+    """
+    return _tools().draft_plan(int(max_len), priority)
+
+
+@mcp.tool()
+def get_plan(plan_id: int) -> dict[str, Any]:
+    """Read one plan, its swaps and its approval record out of the graph. Unknown id -> `unknown_entity`."""
+    return _tools().get_plan(plan_id)
+
+
+@mcp.tool()
+def list_plans() -> dict[str, Any]:
+    """Every plan in the graph with its status, and the pairs approved plans have committed."""
+    return _tools().list_plans()
 
 
 def main() -> None:

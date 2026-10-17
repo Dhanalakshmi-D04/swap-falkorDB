@@ -19,7 +19,7 @@ INDEX = WEB_DIR / "index.html"
 APP_JS = WEB_DIR / "app.js"
 
 #: The section anchors the sticky navigation points at, and the panels the page promises.
-SECTION_IDS = ("topnav", "main", "hero", "how", "result", "swaps", "leftout", "whatif", "hood")
+SECTION_IDS = ("topnav", "main", "hero", "how", "result", "swaps", "leftout", "whatif", "plan", "hood")
 
 #: `$("id")` reaches for an element; `$$("...")` is a selector, so it is deliberately excluded.
 _DOLLAR_ID = re.compile(r'(?<!\$)\$\("([^"]+)"\)')
@@ -117,7 +117,7 @@ def test_every_step_in_the_stepper_has_a_panel_and_a_route() -> None:
     links = _STEP_LINK.findall(html)
     panels = set(_PANEL.findall(html))
 
-    assert len(links) == 5
+    assert len(links) == 6
     assert all(route == step for route, step in links)
     assert {step for _, step in links} == panels
     for _, step in links:
