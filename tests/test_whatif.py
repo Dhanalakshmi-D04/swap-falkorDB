@@ -1,9 +1,10 @@
-"""M5 what-if tests: a modified copy in a scratch graph, diffed against the active pool.
+"""M5 what-if tests: a copy FalkorDB makes of the active graph, changed in Cypher and diffed.
 
 Needs FalkorDB on the configured host/port: skipped cleanly without it. The invariants pinned here:
 removing a pair never raises the matched count (and equals an independent recomputation from a
-freshly loaded copy), adding an altruist never lowers it (and adds at most two patients), and the
-scratch graph never outlives the call.
+freshly loaded copy), adding an altruist never lowers it (and adds at most two patients), the copy
+never outlives the call, the active graph is never changed, and the pool never leaves the database
+(no Python read-back or reload is used).
 """
 
 from __future__ import annotations
@@ -153,3 +154,66 @@ def test_every_kind_returns_an_envelope(active: tuple[Pool, SwapTools]) -> None:
         _assert_envelope(env)
         assert env["result"]["kind"] == kind
         assert env["trace"]["rows"] >= 0
+
+
+@pytest.mark.parametrize(
+    ("kind", "args"),
+    [
+        ("add_altruistic_donor", {"donor_abo": "O"}),
+        ("remove_pair", {"pair_id": 3}),
+        ("set_priority", {"pair_id": 4, "weight": 2.0}),
+    ],
+)
+def test_the_pool_never_leaves_the_database(
+    active: tuple[Pool, SwapTools], db: FalkorDB, monkeypatch: pytest.MonkeyPatch, kind: str, args: dict
+) -> None:
+    import swap.graph
+
+    def refuse(*_: object, **__: object) -> None:
+        raise AssertionError("a what-if must not read the pool into Python or reload it")
+
+    monkeypatch.setattr(swap.graph, "pool_from_graph", refuse)
+    monkeypatch.setattr(swap.graph, "load_pool", refuse)
+    _, tools = active
+    env = tools.what_if(kind, args)
+    _assert_envelope(env)
+    scratch = env["result"]["scratch"]
+    assert scratch["method"] == "GRAPH.COPY" and scratch["dropped"]
+    assert scratch["graph"] == scratch_name(GRAPH)
+    assert scratch["mutations"] and scratch["copy_ms"] >= 0
+    assert scratch_name(GRAPH) not in db.list_graphs()
+
+
+def test_remove_pair_leaves_the_active_graph_untouched(active: tuple[Pool, SwapTools]) -> None:
+    _, tools = active
+    pairs = tools.n_pairs()
+    swaps = tools.graph.query("MATCH (c:Cycle) RETURN count(c)").result_set[0][0]
+    env = tools.what_if("remove_pair", {"pair_id": 5})
+    assert env["result"]["after"]["pairs"] == pairs - 1
+    assert tools.n_pairs() == pairs
+    assert tools.graph.query("MATCH (c:Cycle) RETURN count(c)").result_set[0][0] == swaps
+    names = [m["name"] for m in env["result"]["scratch"]["mutations"]]
+    assert names[:2] == ["whatif_remove_pair_cycles", "whatif_remove_pair"]
+
+
+def test_prioritising_a_pair_that_is_already_hard_changes_nothing(
+    active: tuple[Pool, SwapTools],
+) -> None:
+    _, tools = active  # another test reloads this graph: read the hard pair from the graph itself
+    hard = tools.hard_pair_ids()[0]
+    env = tools.what_if("set_priority", {"pair_id": hard, "weight": 3.0})
+    mutations = env["result"]["scratch"]["mutations"]
+    assert [m["name"] for m in mutations] == ["whatif_set_hard"]
+    assert mutations[0]["rows"] == 0
+    assert env["result"]["delta"] == 0
+
+
+def test_prioritising_a_pair_bumps_its_stored_swaps(active: tuple[Pool, SwapTools]) -> None:
+    _, tools = active
+    easy = tools.graph.query("MATCH (p:Pair) WHERE NOT p.hard RETURN p.id ORDER BY p.id LIMIT 1").result_set[0][0]
+    swaps = tools.graph.query(
+        "MATCH (c:Cycle) WHERE $id IN c.members RETURN count(c)", {"id": easy}
+    ).result_set[0][0]
+    env = tools.what_if("set_priority", {"pair_id": easy, "weight": 3.0})
+    mutations = {m["name"]: m["rows"] for m in env["result"]["scratch"]["mutations"]}
+    assert mutations == {"whatif_set_hard": 1, "whatif_bump_cycle_hard": swaps}

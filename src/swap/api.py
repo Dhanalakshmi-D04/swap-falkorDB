@@ -26,14 +26,16 @@ from swap.agent import run_agent
 from swap.config import DEFAULT_ACTIVE_GRAPH
 from swap.generator import generate_pool as draw_pool
 from swap.graph import CYPHER as LOADER_CYPHER
-from swap.graph import connect, graph_counts, load_pool, pool_from_graph
+from swap.graph import connect, ensure_swap_objects, graph_counts, load_pool, pool_from_graph
 from swap.plan import render_packet_markdown
 from swap.tools import CYPHER as TOOL_CYPHER
-from swap.tools import PlanStateError, SolverError, SwapTools
+from swap.tools import PlanGuardError, PlanStateError, SolverError, SwapTools
+from swap.whatif import WHATIF_CYPHER
 
 ACTIVE_GRAPH = DEFAULT_ACTIVE_GRAPH
 TRACE_LIMIT = 200
 EDGE_CAP = 1500
+MAX_POOL = 500
 #: Default pool loaded at startup when the active graph is missing, so a fresh visitor sees data.
 DEFAULT_POOL_N = 200
 DEFAULT_POOL_SEED = 1000
@@ -57,7 +59,13 @@ def ensure_default_pool(
     """
     db = db if db is not None else connect()
     if graph_name in db.list_graphs():
-        return {"graph": graph_name, "loaded": False, "reason": "graph already exists"}
+        created = ensure_swap_objects(db.select_graph(graph_name))
+        return {
+            "graph": graph_name,
+            "loaded": False,
+            "reason": "graph already exists",
+            "swap_objects_added": created,
+        }
     pool = draw_pool(n, seed)
     stats = load_pool(pool, graph_name, db=db)
     return {"graph": graph_name, "loaded": True, "summary": pool.summary(), "load": stats.summary()}
@@ -90,6 +98,12 @@ async def solver_gave_up(_: Request, exc: SolverError) -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
+@app.exception_handler(PlanGuardError)
+async def guard_refused(_: Request, exc: PlanGuardError) -> JSONResponse:
+    """FalkorDB's pre-write check refused a drafted set of swaps: nothing was written."""
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
 def _tools() -> SwapTools:
     return SwapTools(ACTIVE_GRAPH)
 
@@ -101,7 +115,8 @@ def _record(env: dict[str, Any]) -> dict[str, Any]:
 
 
 class PoolRequest(BaseModel):
-    n: int = Field(default=100, ge=0, le=2000, description="number of incompatible pairs")
+    # Every 2- and 3-way swap is stored as a graph object, which grows with the cube of n.
+    n: int = Field(default=100, ge=0, le=MAX_POOL, description="number of incompatible pairs")
     seed: int = Field(default=1, description="deterministic RNG seed")
 
 
@@ -114,13 +129,24 @@ class WhatIfRequest(BaseModel):
 
 
 class PlanRequest(BaseModel):
-    max_len: int = Field(default=3, ge=2, le=4)
+    max_len: int = Field(default=3, ge=2, le=3)
     priority: float | None = Field(default=None, gt=0)
 
 
 class DecisionRequest(BaseModel):
     decision: Literal["approve", "reject"]
     decided_by: str = Field(min_length=1, max_length=80, description="the person deciding")
+
+
+class CrossmatchRequest(BaseModel):
+    donor_pair: int = Field(description="the pair whose donor was tested")
+    patient_pair: int = Field(description="the pair whose patient was tested")
+    result: Literal["positive", "negative"] = Field(description="positive = the transplant cannot go ahead")
+    recorded_by: str = Field(min_length=1, max_length=80, description="the person recording the result")
+
+
+class RepairRequest(BaseModel):
+    max_len: int = Field(default=3, ge=2, le=3)
 
 
 class AskRequest(BaseModel):
@@ -157,9 +183,9 @@ def best_set(
 
 
 @app.get("/tools/explain/{pair_id}")
-def explain(pair_id: int) -> dict[str, Any]:
-    """Who could give to this pair's patient and why others cannot; unknown id -> `unknown_entity`."""
-    return _record(_tools().explain_unmatched(pair_id))
+def explain(pair_id: int, plan: int | None = Query(None, ge=1)) -> dict[str, Any]:
+    """Why this pair is (not) in a swap, against a plan (default: the latest) or the best set."""
+    return _record(_tools().explain_unmatched(pair_id, plan))
 
 
 @app.post("/tools/what_if")
@@ -195,6 +221,34 @@ def decide_plan(plan_id: int, request: DecisionRequest) -> dict[str, Any]:
         return _record(_tools().decide_plan(plan_id, request.decision, request.decided_by))
     except PlanStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/crossmatch")
+def record_crossmatch(request: CrossmatchRequest) -> dict[str, Any]:
+    """HUMAN-ONLY: record a lab crossmatch; on a positive result the graph reacts at once."""
+    return _record(
+        _tools().record_crossmatch(
+            request.donor_pair, request.patient_pair, request.result, request.recorded_by
+        )
+    )
+
+
+@app.get("/crossmatches")
+def crossmatches() -> dict[str, Any]:
+    """Every crossmatch result recorded in the graph."""
+    return _record(_tools().list_crossmatches())
+
+
+@app.get("/crossmatches/{crossmatch_id}/impact")
+def crossmatch_impact(crossmatch_id: int) -> dict[str, Any]:
+    """What a result broke, who it stranded, the 2-way swap still alive, the options left."""
+    return _record(_tools().failure_impact(crossmatch_id))
+
+
+@app.post("/crossmatches/{crossmatch_id}/repair")
+def crossmatch_repair(crossmatch_id: int, request: RepairRequest) -> dict[str, Any]:
+    """Draft a repair plan over the swaps still alive (a person approves it like any plan)."""
+    return _record(_tools().draft_repair(crossmatch_id, request.max_len))
 
 
 @app.get("/plans/{plan_id}/packet.md")
@@ -285,7 +339,7 @@ def trace() -> dict[str, Any]:
 @app.get("/cypher")
 def cypher() -> dict[str, Any]:
     """Every human-written Cypher statement the product runs, named (tool queries + pool loader)."""
-    return {"queries": {**LOADER_CYPHER, **TOOL_CYPHER}}
+    return {"queries": {**LOADER_CYPHER, **TOOL_CYPHER, **WHATIF_CYPHER}}
 
 
 @app.get("/graph")

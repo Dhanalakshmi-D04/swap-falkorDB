@@ -21,6 +21,7 @@ from swap.graph import load_pool
 from swap.tools import SwapTools
 
 ACTIVE_GRAPH = DEFAULT_ACTIVE_GRAPH
+MAX_POOL = 500
 
 INSTRUCTIONS = (
     "Kidney paired-exchange decision support over a FalkorDB graph of SYNTHETIC patients (not "
@@ -29,7 +30,9 @@ INSTRUCTIONS = (
     "(vertex-disjoint packing of the graph's cycles), true_cycle_optimum (any cycle length), "
     "explain_unmatched (who could give to a patient, and why others cannot), what_if (add an "
     "altruistic donor, remove a pair, or set a priority), draft_plan (record a DRAFT plan in the graph; "
-    "only a person can approve it, there is no tool for that), get_plan and list_plans. Every tool returns {outcome, result, "
+    "only a person can approve it, there is no tool for that), get_plan and list_plans, and after a "
+    "person records a failed crossmatch: list_crossmatches, failure_impact (what broke, who is "
+    "stranded) and draft_repair (a DRAFT repair over the swaps still alive). Every tool returns {outcome, result, "
     "path, trace}; an empty traversal means the graph does not know the answer, not that it is safe."
 )
 
@@ -46,8 +49,10 @@ def generate_pool(n: int = 100, seed: int = 1) -> dict[str, Any]:
 
     Draws `n` synthetic incompatible donor/patient pairs deterministically from `seed`, loads them
     into the active FalkorDB graph, and returns its summary. Call this before any other tool; a
-    later call replaces the pool.
+    later call replaces the pool. `n` is at most 500: every 2- and 3-way swap is stored in the graph.
     """
+    if not 0 <= n <= MAX_POOL:
+        raise ValueError(f"n must be between 0 and {MAX_POOL}, got {n}")
     with timed() as timer:
         pool = draw_pool(n, seed)
         stats = load_pool(pool, ACTIVE_GRAPH)
@@ -105,14 +110,16 @@ def true_cycle_optimum() -> dict[str, Any]:
 
 
 @mcp.tool()
-def explain_unmatched(pair_id: int) -> dict[str, Any]:
-    """Explain one pair: who could give to its patient, why others cannot, and its cycles.
+def explain_unmatched(pair_id: int, plan_id: int | None = None) -> dict[str, Any]:
+    """Why one pair is or is not in a swap, walked in the graph.
 
-    Resolves the id against the graph first. Unknown id -> outcome `unknown_entity`. No incoming
-    donor -> outcome `not_in_graph` (an empty traversal means the graph does not know, which is not
-    the same as safe).
+    Returns who could give to this patient and why others cannot, the cycles through the pair, and
+    a verdict with evidence: the chosen swaps blocking its options (a 4-hop walk), the shortest ring
+    back to it (shortestPath) with alternative routes (algo.SPpaths), or a donor who can give to
+    nobody. Explained against `plan_id`, else the latest plan, else the best set. An id the graph
+    does not hold answers `unknown_entity`.
     """
-    return _tools().explain_unmatched(pair_id)
+    return _tools().explain_unmatched(pair_id, plan_id)
 
 
 @mcp.tool()
@@ -141,13 +148,40 @@ def what_if(
 
 
 @mcp.tool()
-def draft_plan(max_len: Literal[2, 3, 4] = 3, priority: float | None = None) -> dict[str, Any]:
-    """Draft a swap plan from the best set and record it in the graph as a DRAFT.
+def draft_plan(max_len: Literal[2, 3] = 3, priority: float | None = None) -> dict[str, Any]:
+    """Draft a swap plan from the swaps still available and record it in the graph as a DRAFT.
 
-    Skips pairs already committed by an approved plan. Approving or rejecting a plan is a human
-    action and is deliberately not available as a tool.
+    Skips swaps a failed crossmatch killed and pairs an approved plan committed; FalkorDB checks
+    the chosen swaps before anything is written. Approving or rejecting a plan is a human action
+    and is deliberately not available as a tool.
     """
     return _tools().draft_plan(int(max_len), priority)
+
+
+@mcp.tool()
+def failure_impact(crossmatch_id: int) -> dict[str, Any]:
+    """What one recorded crossmatch result broke, from the graph.
+
+    Returns how many stored swaps it killed, which planned swaps broke, the stranded patients, the
+    2-way swap still alive inside a broken 3-way swap (a back-arc), and the live options left for
+    each stranded patient. Recording a result is a human action and is not available as a tool.
+    """
+    return _tools().failure_impact(crossmatch_id)
+
+
+@mcp.tool()
+def draft_repair(crossmatch_id: int, max_len: Literal[2, 3] = 3) -> dict[str, Any]:
+    """Draft a REPAIR plan after a failed crossmatch, over the swaps still alive in the graph.
+
+    Re-matches the stranded patients first. It is only a draft: a person approves it.
+    """
+    return _tools().draft_repair(crossmatch_id, int(max_len))
+
+
+@mcp.tool()
+def list_crossmatches() -> dict[str, Any]:
+    """Every crossmatch result recorded in the graph, with how many swaps each one killed."""
+    return _tools().list_crossmatches()
 
 
 @mcp.tool()

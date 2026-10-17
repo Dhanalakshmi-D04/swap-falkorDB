@@ -1,7 +1,7 @@
 """README drift guard: what the README quotes must be what the code runs.
 
 The README's "Cypher and algorithms" section quotes Cypher verbatim and claims it lives in
-`src/swap/tools.py` and `src/swap/graph.py`. This test extracts every Cypher-looking line from
+`src/swap/tools.py`, `graph.py`, `failure.py`, `explain.py` and `whatif.py`. This test extracts every Cypher-looking line from
 every fenced block in `README.md` and asserts each one is exactly a Cypher constant in the code
 (whitespace-normalised), so a README that drifts from the Cypher fails here. It also pins the
 honest-framing wording: no "theoretical limit", and "safe" appears only in the sentence that says
@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from swap import envelope, graph, tools
+from swap import envelope, explain, failure, graph, tools, whatif
 
 README = Path(__file__).resolve().parents[1] / "README.md"
 CYPHER_STARTS = ("MATCH", "CREATE", "UNWIND", "MERGE", "CALL", "WITH", "RETURN")
@@ -66,7 +66,7 @@ def _readme_cypher(readme: str) -> list[tuple[str, str]]:
 
 
 def test_readme_quotes_the_code_cypher_verbatim() -> None:
-    known = _module_constants(tools, graph, envelope)
+    known = _module_constants(tools, graph, envelope, failure, explain, whatif)
     statements = _readme_cypher(README.read_text(encoding="utf-8"))
 
     assert statements, "expected the README to quote some Cypher"

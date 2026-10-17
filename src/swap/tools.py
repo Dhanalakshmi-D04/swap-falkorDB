@@ -14,10 +14,12 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping
 from datetime import UTC, datetime
+from time import perf_counter
 from typing import Any
 
 from falkordb import FalkorDB, Graph
 
+from swap import cache
 from swap.config import DEFAULT_GRAPH, Settings
 from swap.envelope import (
     Outcome,
@@ -27,8 +29,16 @@ from swap.envelope import (
     envelope,
     resolve_pair,
 )
-from swap.graph import COUNT_FLOW_EDGES, can_give_edges, connect, ensure_result_set_size
-from swap.solve import pack_cycles, unbounded_cycle_cover
+from swap.explain import EXPLAIN_CYPHER
+from swap.failure import FAILURE_CYPHER
+from swap.graph import (
+    COUNT_FLOW_EDGES,
+    can_give_edges,
+    connect,
+    ensure_result_set_size,
+    ensure_swap_objects,
+)
+from swap.solve import cycle_weight, pack_cycles, unbounded_cycle_cover
 
 # --- Cypher (human-written, parameterised) --------------------------------------------------
 
@@ -51,6 +61,28 @@ FIND_CYCLES_4 = (
     "-[:CAN_GIVE]->(a) "
     "WHERE a.id < b.id AND a.id < c.id AND a.id < d.id AND b.id <> d.id "
     "RETURN a.id, b.id, c.id, d.id ORDER BY a.id, b.id, c.id, d.id"
+)
+
+# Swap objects (graph.MATERIALISE_2/3 stores every 2- and 3-way swap as a :Cycle). The planner reads
+# its candidates from them, in the same order as FIND_CYCLES_2/3 return the rings, scored by what the
+# graph stored: `hard` (highly sensitised members) and `back_arcs`. `live` = no failed crossmatch on
+# any arc; `taken` = a member is committed by an approved plan.
+CANDIDATES_ALL = (
+    "MATCH (c:Cycle) WHERE c.live AND c.len <= $max_len "
+    "RETURN c.key, c.members, c.hard, c.back_arcs ORDER BY c.len, c.members"
+)
+CANDIDATES_AVAILABLE = (
+    "MATCH (c:Cycle) WHERE c.live AND NOT c.taken AND c.len <= $max_len "
+    "RETURN c.key, c.members, c.hard, c.back_arcs ORDER BY c.len, c.members"
+)
+COUNT_SWAP_OBJECTS = "MATCH (c:Cycle) RETURN count(c)"
+# A fingerprint of everything the packing reads (cheap next to the integer program it saves).
+SWAP_FINGERPRINT = (
+    "MATCH (c:Cycle) RETURN count(c), sum(CASE WHEN c.live THEN 1 ELSE 0 END), "
+    "sum(CASE WHEN c.taken THEN 1 ELSE 0 END), sum(c.hard), sum(c.members[0] * 1000 + c.members[1])"
+)
+POOL_FINGERPRINT = (
+    "MATCH (p:Pair) OPTIONAL MATCH (a:Altruist) RETURN count(DISTINCT p), count(DISTINCT a)"
 )
 
 # algo.maxFlow over the donor -> patient network built by graph.py. The figure is a maximum
@@ -99,8 +131,26 @@ CHAIN_TWO = (
 # status; approved plans commit their pairs, and the next draft skips them.
 NEXT_PLAN_ID = "MATCH (pl:Plan) RETURN coalesce(max(pl.id), 0) + 1"
 CREATE_PLAN = (
-    "CREATE (pl:Plan {id: $id, status: 'draft', created_at: $created_at, max_len: $max_len, "
-    "priority: $priority, matched: $matched, swaps: $swaps}) RETURN pl.id"
+    "CREATE (pl:Plan {id: $id, kind: $kind, status: 'draft', created_at: $created_at, "
+    "max_len: $max_len, priority: $priority, matched: $matched, swaps: $swaps}) RETURN pl.id"
+)
+# Each plan points at the swap objects it chose, so a later crossmatch failure can find it.
+ADD_SELECTS = (
+    "MATCH (pl:Plan {id: $plan}) UNWIND $keys AS k MATCH (c:Cycle {key: k}) "
+    "CREATE (pl)-[:SELECTS]->(c) RETURN count(*)"
+)
+# The guard FalkorDB runs before a draft is written: the chosen swaps are distinct, share no pair,
+# are all alive and not taken, and every donor -> patient arc in them still exists.
+GUARD_PAIRS = (
+    "UNWIND $keys AS k MATCH (c:Cycle {key: k}) UNWIND c.members AS m "
+    "RETURN count(DISTINCT c), count(m), count(DISTINCT m), "
+    "sum(CASE WHEN c.live THEN 0 ELSE 1 END), sum(CASE WHEN c.taken THEN 1 ELSE 0 END)"
+)
+GUARD_ARCS = (
+    "UNWIND $keys AS k MATCH (c:Cycle {key: k}) UNWIND range(0, c.len - 1) AS i "
+    "WITH c.members[i] AS a, c.members[(i + 1) % c.len] AS b "
+    "MATCH (x:Pair {id: a}), (y:Pair {id: b}) OPTIONAL MATCH (x)-[r:CAN_GIVE]->(y) "
+    "RETURN count(*), sum(CASE WHEN r IS NULL THEN 1 ELSE 0 END)"
 )
 ADD_PLAN_STEPS = (
     "UNWIND $rows AS r MATCH (pl:Plan {id: $plan}), (p:Pair {id: r[2]}) "
@@ -108,7 +158,11 @@ ADD_PLAN_STEPS = (
 )
 READ_PLAN = (
     "MATCH (pl:Plan {id: $id}) RETURN pl.id, pl.status, pl.created_at, pl.max_len, pl.priority, "
-    "pl.matched, pl.swaps, pl.decided_by, pl.decided_at"
+    "pl.matched, pl.swaps, pl.decided_by, pl.decided_at, pl.kind"
+)
+READ_PLAN_CYCLES = (
+    "MATCH (pl:Plan {id: $id})-[:SELECTS]->(c:Cycle) OPTIONAL MATCH (t:Crossmatch)-[:BROKE]->(c) "
+    "RETURN c.key, c.members, c.live, collect(t.id)"
 )
 READ_PLAN_STEPS = (
     "MATCH (pl:Plan {id: $id})-[r:PROPOSES]->(p:Pair) "
@@ -122,9 +176,22 @@ DECIDE_PLAN = (
     "MATCH (pl:Plan {id: $id}) SET pl.status = $status, pl.decided_by = $by, pl.decided_at = $at "
     "RETURN pl.id"
 )
-COMMITTED_PAIR_IDS = (
-    "MATCH (pl:Plan {status: 'approved'})-[:PROPOSES]->(p:Pair) RETURN DISTINCT p.id ORDER BY p.id"
+# A plan can only be approved while every swap it chose is still alive and untaken.
+PLAN_STALE_CHECK = (
+    "MATCH (:Plan {id: $id})-[:SELECTS]->(c:Cycle) RETURN count(c), "
+    "sum(CASE WHEN c.live THEN 0 ELSE 1 END), sum(CASE WHEN c.taken THEN 1 ELSE 0 END)"
 )
+# Approval commits the pairs, then marks every swap that touches a committed pair as taken (a scan
+# of the stored member lists: one pass over the swap objects, not one traversal per pair).
+COMMIT_PAIRS = (
+    "MATCH (:Plan {id: $id})-[:SELECTS]->(c:Cycle) UNWIND c.members AS m MATCH (p:Pair {id: m}) "
+    "SET p.committed = $id RETURN collect(p.id)"
+)
+MARK_TAKEN = (
+    "MATCH (c:Cycle) WHERE NOT c.taken AND any(m IN c.members WHERE m IN $ids) "
+    "SET c.taken = true RETURN count(c)"
+)
+COMMITTED_PAIR_IDS = "MATCH (p:Pair) WHERE p.committed IS NOT NULL RETURN p.id ORDER BY p.id"
 
 CYPHER: dict[str, str] = {
     "count_pairs": COUNT_PAIRS,
@@ -132,6 +199,11 @@ CYPHER: dict[str, str] = {
     "find_cycles_2": FIND_CYCLES_2,
     "find_cycles_3": FIND_CYCLES_3,
     "find_cycles_4": FIND_CYCLES_4,
+    "candidates_all": CANDIDATES_ALL,
+    "candidates_available": CANDIDATES_AVAILABLE,
+    "count_swap_objects": COUNT_SWAP_OBJECTS,
+    "swap_fingerprint": SWAP_FINGERPRINT,
+    "pool_fingerprint": POOL_FINGERPRINT,
     "flow_bound": FLOW_BOUND,
     "explain_incoming": EXPLAIN_INCOMING,
     "explain_outgoing": EXPLAIN_OUTGOING,
@@ -144,11 +216,20 @@ CYPHER: dict[str, str] = {
     "next_plan_id": NEXT_PLAN_ID,
     "create_plan": CREATE_PLAN,
     "add_plan_steps": ADD_PLAN_STEPS,
+    "add_selects": ADD_SELECTS,
+    "guard_pairs": GUARD_PAIRS,
+    "guard_arcs": GUARD_ARCS,
     "read_plan": READ_PLAN,
+    "read_plan_cycles": READ_PLAN_CYCLES,
     "read_plan_steps": READ_PLAN_STEPS,
     "list_plans": LIST_PLANS,
     "decide_plan": DECIDE_PLAN,
+    "plan_stale_check": PLAN_STALE_CHECK,
+    "commit_pairs": COMMIT_PAIRS,
+    "mark_taken": MARK_TAKEN,
     "committed_pair_ids": COMMITTED_PAIR_IDS,
+    **FAILURE_CYPHER,
+    **EXPLAIN_CYPHER,
 }
 
 CYCLES_BY_LENGTH = {2: FIND_CYCLES_2, 3: FIND_CYCLES_3, 4: FIND_CYCLES_4}
@@ -171,6 +252,10 @@ class SolverError(RuntimeError):
 
 class PlanStateError(ValueError):
     """A plan decision that is not allowed from the plan's current status (the API answers 409)."""
+
+
+class PlanGuardError(RuntimeError):
+    """FalkorDB's pre-write check rejected a drafted set of swaps; nothing was written."""
 
 
 def _rotate_to_min(cycle: list[int]) -> list[int]:
@@ -217,6 +302,22 @@ class SwapTools:
         ensure_result_set_size(self.db)
         self.graph_name = graph_name
         self.graph = graph if graph is not None else self.db.select_graph(graph_name)
+        self.work: list[dict[str, Any]] = []
+        self._swap_objects_checked = False
+
+    def _run(self, name: str, params: dict[str, Any] | None = None) -> list[Any]:
+        """Run one named statement and note what the graph did (name, ms, rows) in `self.work`."""
+        started = perf_counter()
+        rows = self.graph.query(CYPHER[name], params or {}).result_set
+        self.work.append(
+            {"name": name, "ms": round((perf_counter() - started) * 1000, 1), "rows": len(rows)}
+        )
+        return rows
+
+    def _ensure_swap_objects(self) -> None:
+        if not self._swap_objects_checked:
+            ensure_swap_objects(self.graph)
+            self._swap_objects_checked = True
 
     # -- M3 ---------------------------------------------------------------------------------
 
@@ -277,10 +378,17 @@ class SwapTools:
             return envelope(Outcome.NOT_IN_GRAPH, result, (), trace=trace)
         return envelope(Outcome.ANSWERED_WITH_PATH, result, matched, trace=trace)
 
-    def explain_unmatched(self, pair_id: Any) -> dict[str, Any]:
-        """Who could give to this patient and why others cannot; the cycles through this pair."""
+    def explain_unmatched(self, pair_id: Any, plan_id: int | None = None) -> dict[str, Any]:
+        """Why this patient is (not) in a swap, walked in the graph, against a plan or the best set.
+
+        Who could give to this patient and why others cannot, the cycles through the pair, and the
+        verdict with its evidence (swaps/explain.py): the chosen swaps that block it, the shortest
+        ring back to it, or a donor who can give to nobody.
+        """
+        from swap.explain import against, reasons
+
         timer = Timer()
-        args = {"pair_id": pair_id}
+        args = {"pair_id": pair_id, "plan_id": plan_id}
         try:
             pair = resolve_pair(self.graph, pair_id)
         except UnknownEntity as exc:
@@ -298,7 +406,11 @@ class SwapTools:
         abo_compatible = int(abo_ok)
         abo_incompatible = int(abo_bad)
         cycles_through = self._cycles_through(pair.id)
-        timer.stop(len(incoming) + len(outgoing) + 1)
+        self._ensure_swap_objects()
+        self.work = []
+        why = reasons(self, pair.id, against(self, plan_id))
+        why["graph_work"] = list(self.work)
+        timer.stop(len(incoming) + len(outgoing) + len(self.work))
 
         result = {
             "pair": {
@@ -319,15 +431,20 @@ class SwapTools:
                 ),
             },
             "cycles_through": cycles_through,
+            **why,
         }
+        evidence = [list(c) for c in cycles_through]
+        evidence += [b["members"] for b in why["blocked_by"] if b["members"] not in evidence]
+        if why["shortest_ring"]["ring"]:
+            evidence.append(why["shortest_ring"]["ring"][:-1])
         trace = build_trace("explain_unmatched", args, timer)
         if not incoming:
             result["note"] = (
                 f"{EMPTY_NOTE} donor that can give to this patient (empty traversal: the graph "
                 "does not know, which is not the same as safe)"
             )
-            return envelope(Outcome.NOT_IN_GRAPH, result, cycles_through, trace=trace)
-        return envelope(Outcome.ANSWERED_WITH_PATH, result, cycles_through, trace=trace)
+            return envelope(Outcome.NOT_IN_GRAPH, result, evidence, trace=trace)
+        return envelope(Outcome.ANSWERED_WITH_PATH, result, evidence, trace=trace)
 
     # -- M4 ---------------------------------------------------------------------------------
 
@@ -336,44 +453,93 @@ class SwapTools:
         max_len: int = 3,
         priority: float | None = None,
         exclude: Collection[int] = (),
+        available_only: bool = False,
     ) -> dict[str, Any]:
-        """Vertex-disjoint packing of the graph's candidate cycles (and altruist chains).
+        """Vertex-disjoint packing of the graph's swaps (and altruist chains).
 
-        `exclude` drops every candidate cycle that touches one of those pair ids (used to plan
-        around pairs already committed by an approved plan).
+        For 2- and 3-way swaps the candidates are the graph's swap objects, scored by what the graph
+        stored: weight = size + (priority - 1) x highly sensitised members. `available_only` skips
+        swaps a failed crossmatch killed or an approved plan took (the planner's view); otherwise
+        this is the pool-wide optimum. `exclude` drops every candidate touching those pair ids.
         """
         timer = Timer()
+        self.work = []
         weight = 1.0 if priority is None else float(priority)
         args = {"max_len": max_len, "priority": priority}
+        memo = None
+        if max_len in (2, 3):
+            self._ensure_swap_objects()
+            swaps = tuple(self._run("swap_fingerprint")[0])
+            # With nothing dead or taken, "available" is every swap: the same answer.
+            same_as_all = swaps[1] == swaps[0] and not swaps[2]
+            memo = (
+                self.graph_name,
+                max_len,
+                weight,
+                available_only and not same_as_all,
+                tuple(sorted(int(v) for v in exclude)),
+                *swaps,
+                *self._run("pool_fingerprint")[0],
+            )
+            hit = cache.get(memo)
+            if hit is not None:
+                result = {
+                    **hit["result"],
+                    "available_only": available_only,
+                    "graph_work": list(self.work),
+                    "memo": True,
+                }
+                timer.stop(len(self.work))
+                trace = build_trace("best_set", args, timer)
+                return envelope(Outcome(hit["outcome"]), result, hit["path"], trace=trace)
 
-        found = self.find_cycles(max_len)
-        cycles = found["result"]["cycles"]
+        keys: list[str] = []
+        back_arcs: list[int] = []
+        storage_note = None
+        if max_len == 4:
+            found = self.find_cycles(max_len)
+            cycles = found["result"]["cycles"]
+            weights = [cycle_weight(c, self.hard_pair_ids(), weight) for c in cycles]
+            storage_note = "4-way swaps are counted by the graph but not stored as swap objects"
+        elif max_len in (2, 3):
+            statement = "candidates_available" if available_only else "candidates_all"
+            rows = self._run(statement, {"max_len": max_len})
+            cycles = [[int(m) for m in row[1]] for row in rows]
+            keys = [str(row[0]) for row in rows]
+            back_arcs = [int(row[3]) for row in rows]
+            weights = [len(row[1]) + (weight - 1.0) * int(row[2]) for row in rows]
+        else:
+            raise ValueError(f"max_len must be one of {sorted(CYCLES_BY_LENGTH)}, got {max_len!r}")
         if exclude:
             skip = {int(value) for value in exclude}
-            cycles = [cycle for cycle in cycles if skip.isdisjoint(cycle)]
+            kept = [i for i, cycle in enumerate(cycles) if skip.isdisjoint(cycle)]
+            cycles = [cycles[i] for i in kept]
+            weights = [weights[i] for i in kept]
+            keys = [keys[i] for i in kept] if keys else keys
+            back_arcs = [back_arcs[i] for i in kept] if back_arcs else back_arcs
         chains, chain_groups = self._chain_candidates()
-        hard_ids = self.hard_pair_ids()
+        if chains:
+            hard_ids = self.hard_pair_ids()
+            weights = weights + [cycle_weight(chain, hard_ids, weight) for chain in chains]
         # Chains are columns len(cycles).. in the combined candidate list; shift their groups.
         groups = [[column + len(cycles) for column in group] for group in chain_groups]
-        pack = pack_cycles(
-            cycles + chains,
-            hard_ids=hard_ids,
-            priority_weight=weight,
-            at_most_one_groups=groups,
-        )
-        timer.stop(found["trace"]["rows"] + len(chains) + 1)
+        pack = pack_cycles(cycles + chains, weights=weights, at_most_one_groups=groups)
+        timer.stop(len(cycles) + len(chains) + 1)
         if not pack.chosen and not pack.success and (cycles or chains):
             raise SolverError(
                 f"the solver could not finish ({pack.status}) with {len(cycles)} candidate swaps; "
                 "try a shorter swap length or a smaller pool"
             )
 
-        chosen_cycles = [c for i, c in zip(pack.indices, pack.chosen, strict=True) if i < len(cycles)]
+        cycle_columns = [i for i in pack.indices if i < len(cycles)]
+        chosen_cycles = [cycles[i] for i in cycle_columns]
         chosen_chains = [c for i, c in zip(pack.indices, pack.chosen, strict=True) if i >= len(cycles)]
         result = {
             "chosen": pack.chosen,
             "cycles": chosen_cycles,
             "chains": chosen_chains,
+            "cycle_keys": [keys[i] for i in cycle_columns] if keys else [],
+            "chosen_back_arcs": [back_arcs[i] for i in cycle_columns] if back_arcs else [],
             "counts": {
                 "cycles": len(chosen_cycles),
                 "chains": len(chosen_chains),
@@ -382,6 +548,8 @@ class SwapTools:
             "matched": pack.covered,
             "candidate_cycles": len(cycles),
             "candidate_chains": len(chains),
+            "candidates_from": "cycle pattern match" if max_len == 4 else "swap objects",
+            "available_only": available_only,
             "priority_weight": weight,
             "max_len": max_len,
             "solver": {
@@ -389,7 +557,10 @@ class SwapTools:
                 "success": pack.success,
                 "objective": pack.objective,
             },
+            "graph_work": list(self.work),
         }
+        if storage_note:
+            result["note_storage"] = storage_note
         trace = build_trace("best_set", args, timer)
         if pack.chosen and not pack.success:
             result["note"] = (
@@ -398,8 +569,12 @@ class SwapTools:
             )
         if not pack.chosen:
             result["note"] = f"{EMPTY_NOTE} vertex-disjoint swap cycle in this graph"
-            return envelope(Outcome.NOT_IN_GRAPH, result, (), trace=trace)
-        return envelope(Outcome.ANSWERED_WITH_PATH, result, pack.chosen, trace=trace)
+            answer = envelope(Outcome.NOT_IN_GRAPH, result, (), trace=trace)
+        else:
+            answer = envelope(Outcome.ANSWERED_WITH_PATH, result, pack.chosen, trace=trace)
+        if memo is not None and pack.success:
+            cache.put(memo, {"outcome": answer["outcome"], "result": result, "path": answer["path"]})
+        return answer
 
     def true_cycle_optimum(self) -> dict[str, Any]:
         """The unbounded cycle cover (any cycle length) from the graph's edge list, for the proof."""
@@ -431,6 +606,34 @@ class SwapTools:
 
         return run_what_if(self, kind, dict(args or {}))
 
+    # -- when a crossmatch fails (swap/failure.py) --------------------------------------------
+
+    def record_crossmatch(
+        self, donor_pair: Any, patient_pair: Any, result: str, recorded_by: str
+    ) -> dict[str, Any]:
+        """HUMAN-ONLY: record a lab crossmatch. Not in the agent catalogue or the MCP server."""
+        from swap.failure import record_crossmatch
+
+        return record_crossmatch(self, donor_pair, patient_pair, result, recorded_by)
+
+    def failure_impact(self, crossmatch_id: Any) -> dict[str, Any]:
+        """What a crossmatch result broke, who it stranded, and what is still alive to save them."""
+        from swap.failure import failure_impact
+
+        return failure_impact(self, crossmatch_id)
+
+    def draft_repair(self, crossmatch_id: Any, max_len: int = 3) -> dict[str, Any]:
+        """Draft a repair over the swaps still alive, re-matching the stranded patients first."""
+        from swap.failure import draft_repair
+
+        return draft_repair(self, crossmatch_id, max_len)
+
+    def list_crossmatches(self) -> dict[str, Any]:
+        """Every crossmatch result recorded in the graph."""
+        from swap.failure import list_crossmatches
+
+        return list_crossmatches(self)
+
     def altruist_ids(self) -> list[int]:
         """Donor-only altruist node ids in this graph (only a what-if scratch graph has any)."""
         return [int(row[0]) for row in self.graph.query(ALTRUIST_IDS).result_set]
@@ -456,52 +659,104 @@ class SwapTools:
         return [int(row[0]) for row in self.graph.query(COMMITTED_PAIR_IDS).result_set]
 
     def draft_plan(self, max_len: int = 3, priority: float | None = None) -> dict[str, Any]:
-        """Draft a swap plan from the best set and record it in the graph with status `draft`.
+        """Draft a swap plan from the swaps still available and record it in the graph as `draft`.
 
-        Pairs already committed by an approved plan are skipped. The plan stays a draft until a
-        person approves it; there is no tool for that, on purpose.
+        Swaps a failed crossmatch killed or an approved plan took are not candidates. FalkorDB checks
+        the chosen set before anything is written. The plan stays a draft until a person approves
+        it; there is no tool for that, on purpose.
         """
+        if max_len not in (2, 3):
+            raise ValueError(f"a plan uses 2- or 3-way swaps; max_len must be 2 or 3, got {max_len!r}")
         timer = Timer()
-        committed = self.committed_pair_ids()
-        best = self.best_set(max_len, priority, exclude=committed)
-        cycles = best["result"]["cycles"]
         args = {"max_len": max_len, "priority": priority}
-        if not cycles:
+        committed = self.committed_pair_ids()
+        best = self.best_set(max_len, priority, available_only=True)["result"]
+        work = list(best["graph_work"])
+        if not best["cycles"]:
             timer.stop(0)
             result = {
                 "plan": None,
                 "note": f"{EMPTY_NOTE} swap to plan among the pairs not already committed",
                 "excluded_committed": len(committed),
+                "graph_work": work,
             }
             return envelope(
                 Outcome.NOT_IN_GRAPH, result, (), trace=build_trace("draft_plan", args, timer)
             )
 
-        plan_id = int(self.graph.query(NEXT_PLAN_ID).result_set[0][0])
-        self.graph.query(
-            CREATE_PLAN,
-            {
-                "id": plan_id,
-                "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
-                "max_len": max_len,
-                "priority": 1.0 if priority is None else float(priority),
-                "matched": best["result"]["matched"],
-                "swaps": len(cycles),
-            },
+        plan_id, guard = self._write_plan(
+            "plan", best["cycles"], best["cycle_keys"], best["matched"], max_len, priority
         )
-        rows = [[i, pos, pair] for i, cycle in enumerate(cycles) for pos, pair in enumerate(cycle)]
-        written = self.graph.query(ADD_PLAN_STEPS, {"plan": plan_id, "rows": rows}).result_set
-        if int(written[0][0]) != len(rows):
-            raise RuntimeError(f"plan {plan_id}: wrote {written[0][0]} of {len(rows)} steps")
-        timer.stop(len(rows) + 2)
+        work += self.work
+        timer.stop(len(best["cycles"]) + 3)
         packet = self._packet(plan_id, excluded_committed=len(committed))
+        packet["guard"] = guard
+        packet["graph_work"] = work
         packet["note"] = "the plan is a draft in the graph; a person has to approve it"
         return envelope(
             Outcome.ANSWERED_WITH_PATH,
             packet,
-            cycles,
+            best["cycles"],
             trace=build_trace("draft_plan", args, timer),
         )
+
+    def _write_plan(
+        self,
+        kind: str,
+        cycles: list[list[int]],
+        keys: list[str],
+        matched: int,
+        max_len: int,
+        priority: float | None,
+    ) -> tuple[int, dict[str, Any]]:
+        """Guard the chosen swaps in FalkorDB, then write the Plan, its PROPOSES steps and SELECTS."""
+        self.work = []
+        guard = self._guard(keys)
+        if not guard["ok"]:
+            raise PlanGuardError(f"FalkorDB rejected the drafted swaps: {guard}")
+        plan_id = int(self._run("next_plan_id")[0][0])
+        self._run(
+            "create_plan",
+            {
+                "id": plan_id,
+                "kind": kind,
+                "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "max_len": max_len,
+                "priority": 1.0 if priority is None else float(priority),
+                "matched": matched,
+                "swaps": len(cycles),
+            },
+        )
+        rows = [[i, pos, pair] for i, cycle in enumerate(cycles) for pos, pair in enumerate(cycle)]
+        written = self._run("add_plan_steps", {"plan": plan_id, "rows": rows})
+        if int(written[0][0]) != len(rows):
+            raise RuntimeError(f"plan {plan_id}: wrote {written[0][0]} of {len(rows)} steps")
+        selected = self._run("add_selects", {"plan": plan_id, "keys": keys})
+        if int(selected[0][0]) != len(keys):
+            raise RuntimeError(f"plan {plan_id}: linked {selected[0][0]} of {len(keys)} swaps")
+        return plan_id, guard
+
+    def _guard(self, keys: list[str]) -> dict[str, Any]:
+        """FalkorDB's check of a set of swaps: distinct, disjoint, alive, untaken, every arc present."""
+        cycles, members, distinct, dead, taken = self._run("guard_pairs", {"keys": keys})[0]
+        arcs, missing = self._run("guard_arcs", {"keys": keys})[0]
+        guard = {
+            "cycles": int(cycles),
+            "pairs": int(distinct),
+            "arcs_checked": int(arcs),
+            "missing_arcs": int(missing or 0),
+            "shared_pairs": int(members) - int(distinct),
+            "dead": int(dead or 0),
+            "taken": int(taken or 0),
+        }
+        guard["ok"] = (
+            guard["cycles"] == len(keys)
+            and guard["missing_arcs"] == 0
+            and guard["shared_pairs"] == 0
+            and guard["dead"] == 0
+            and guard["taken"] == 0
+        )
+        return guard
 
     def get_plan(self, plan_id: Any) -> dict[str, Any]:
         """Read a plan (and its swaps) back out of the graph; an unknown id is `unknown_entity`."""
@@ -561,8 +816,18 @@ class SwapTools:
             return self._unknown_plan(timer, args, exc, "decide_plan")
         if status != "draft":
             raise PlanStateError(f"plan {pid} is already {status}; only a draft can be decided")
-        self.graph.query(
-            DECIDE_PLAN,
+        self.work = []
+        effects: dict[str, Any] = {}
+        if decision == "approve":
+            swaps, dead, taken = self._run("plan_stale_check", {"id": pid})[0]
+            if int(dead or 0) or int(taken or 0):
+                raise PlanStateError(
+                    f"plan {pid} is stale: {int(dead or 0)} of its {int(swaps)} swaps were broken by a "
+                    f"failed crossmatch and {int(taken or 0)} share a pair with an approved plan; "
+                    "draft a new plan"
+                )
+        self._run(
+            "decide_plan",
             {
                 "id": pid,
                 "status": DECISIONS[decision],
@@ -570,8 +835,15 @@ class SwapTools:
                 "at": datetime.now(UTC).isoformat(timespec="seconds"),
             },
         )
+        if decision == "approve":
+            committed = [int(v) for v in self._run("commit_pairs", {"id": pid})[0][0]]
+            unavailable = int(self._run("mark_taken", {"ids": committed})[0][0])
+            effects = {"committed_pairs": len(committed), "swaps_now_unavailable": unavailable}
+        work = list(self.work)
         packet = self._packet(pid)
-        timer.stop(2)
+        packet["effects"] = effects
+        packet["graph_work"] = work
+        timer.stop(len(work))
         cycles = [swap["pairs"] for swap in packet["swaps"]]
         trace = build_trace("decide_plan", {**args, "decided_by": who}, timer)
         return envelope(Outcome.ANSWERED_WITH_PATH, packet, cycles, trace=trace)
@@ -605,17 +877,27 @@ class SwapTools:
         for swap, _pos, pair, patient_abo, donor_abo, pra, hard in steps:
             by_swap.setdefault(int(swap), []).append((int(pair), patient_abo, donor_abo, pra, hard))
 
+        state = {
+            tuple(int(m) for m in members): (str(key), bool(live), sorted(int(t) for t in tests))
+            for key, members, live, tests in self.graph.query(
+                READ_PLAN_CYCLES, {"id": plan_id}
+            ).result_set
+        }
         swaps = []
         hard_matched = 0
         for index in sorted(by_swap):
             members = by_swap[index]
             hard_matched += sum(1 for member in members if member[4])
             pairs = [member[0] for member in members]
+            key, live, broken_by = state.get(tuple(pairs), (None, True, []))
             swaps.append(
                 {
                     "index": index + 1,
                     "size": len(members),
                     "pairs": pairs,
+                    "key": key,
+                    "live": live,
+                    "broken_by": broken_by,
                     "steps": [
                         {
                             "donor_pair": members[i][0],
@@ -640,6 +922,7 @@ class SwapTools:
             "swaps": int(row[6]),
             "decided_by": row[7],
             "decided_at": row[8],
+            "kind": row[9] or "plan",
         }
         summary = {
             "pairs_in_pool": n_pairs,

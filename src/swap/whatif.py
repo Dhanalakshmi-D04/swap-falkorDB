@@ -1,9 +1,9 @@
-"""M5: what-if questions answered on a modified copy of the pool, in a scratch FalkorDB graph.
+"""M5: what-if questions answered on a copy of the graph that FalkorDB makes itself.
 
-`what_if(kind, args)` copies the active pool into a scratch graph named `<name>__whatif`, mutates
-the copy, re-runs the same graph tools there, diffs the chosen cycles/paths against the original,
-and deletes the scratch graph. Every product answer still comes from FalkorDB; the scratch graph is
-built with `graph.load_pool` from a `Pool` read back out of the active graph.
+`what_if(kind, args)` asks FalkorDB to clone the active graph (`GRAPH.COPY`) into `<name>__whatif`,
+changes the clone with human-written Cypher, re-runs the same graph tools there, diffs the chosen
+swaps against the original and drops the clone. The pool never leaves the database: the clone keeps
+the pairs, the flow network, the stored swaps, the plans and any failed crossmatch.
 
 Kinds:
   * `add_altruistic_donor(donor_abo)` - one donor with no patient: a `:Altruist` node that can give
@@ -21,12 +21,12 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import replace
+from time import perf_counter
 from typing import Any
 
 from swap.envelope import Outcome, Timer, UnknownEntity, build_trace, envelope, resolve_pair
-from swap.generator import ABO_TYPES, Pool
-from swap.graph import attach_altruist, drop_graph, load_pool, pool_from_graph
+from swap.generator import ABO_TYPES
+from swap.graph import attach_altruist, drop_graph
 from swap.tools import EMPTY_NOTE, SwapTools
 
 SCRATCH_SUFFIX = "__whatif"
@@ -36,6 +36,23 @@ ALTRUIST_ID = -1  # donor-only nodes take negative ids, so they never collide wi
 
 WHAT_IF_TOOL = "what_if"
 KINDS = ("add_altruistic_donor", "remove_pair", "set_priority")
+
+# Changes made to the clone, never to the active graph. Removing a pair drops its swaps first.
+REMOVE_PAIR_CYCLES = "MATCH (c:Cycle) WHERE $id IN c.members DETACH DELETE c RETURN count(c)"
+REMOVE_PAIR = "MATCH (p:Pair {id: $id}) DETACH DELETE p RETURN count(*)"
+REMOVE_PAIR_DONOR = "MATCH (d:Donor {id: $id}) DETACH DELETE d RETURN count(*)"
+REMOVE_PAIR_PATIENT = "MATCH (pt:Patient {id: $id}) DETACH DELETE pt RETURN count(*)"
+SET_HARD = "MATCH (p:Pair {id: $id}) WHERE NOT p.hard SET p.hard = true RETURN count(p)"
+BUMP_CYCLE_HARD = "MATCH (c:Cycle) WHERE $id IN c.members SET c.hard = c.hard + 1 RETURN count(c)"
+
+WHATIF_CYPHER: dict[str, str] = {
+    "whatif_remove_pair_cycles": REMOVE_PAIR_CYCLES,
+    "whatif_remove_pair": REMOVE_PAIR,
+    "whatif_remove_pair_donor": REMOVE_PAIR_DONOR,
+    "whatif_remove_pair_patient": REMOVE_PAIR_PATIENT,
+    "whatif_set_hard": SET_HARD,
+    "whatif_bump_cycle_hard": BUMP_CYCLE_HARD,
+}
 
 
 def scratch_name(graph_name: str) -> str:
@@ -56,18 +73,43 @@ def run_what_if(tools: SwapTools, kind: str, args: Mapping[str, Any]) -> dict[st
     return _set_priority(tools, dict(args), timer, max_len)
 
 
+class _Clone:
+    """A FalkorDB-made copy of the active graph, with a log of what was changed in it."""
+
+    def __init__(self, tools: SwapTools, copy_ms: float) -> None:
+        self.tools = tools
+        self.copy_ms = copy_ms
+        self.mutations: list[dict[str, Any]] = []
+
+    def run(self, name: str, params: Mapping[str, Any]) -> int:
+        started = perf_counter()
+        rows = self.tools.graph.query(WHATIF_CYPHER[name], dict(params)).result_set
+        count = int(rows[0][0]) if rows else 0
+        self.mutations.append(
+            {"name": name, "ms": round((perf_counter() - started) * 1000, 1), "rows": count}
+        )
+        return count
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "method": "GRAPH.COPY",
+            "graph": self.tools.graph_name,
+            "copy_ms": self.copy_ms,
+            "mutations": self.mutations,
+            "dropped": True,
+        }
+
+
 @contextmanager
-def _scratch(
-    tools: SwapTools, pool: Pool, altruists: Sequence[tuple[int, str]] = ()
-) -> Iterator[SwapTools]:
-    """Load a modified pool into the scratch graph, yield tools bound to it, always drop it."""
+def _clone(tools: SwapTools) -> Iterator[_Clone]:
+    """Ask FalkorDB to copy the active graph, yield tools bound to the copy, always drop it."""
     name = scratch_name(tools.graph_name)
-    load_pool(pool, name, db=tools.db)
+    drop_graph(tools.db, name)
+    started = perf_counter()
+    tools.graph.copy(name)
+    copy_ms = round((perf_counter() - started) * 1000, 1)
     try:
-        scratch = SwapTools(name, db=tools.db)
-        for altruist_id, donor_abo in altruists:
-            attach_altruist(scratch.graph, altruist_id, donor_abo)
-        yield scratch
+        yield _Clone(SwapTools(name, db=tools.db), copy_ms)
     finally:
         drop_graph(tools.db, name)
 
@@ -108,30 +150,6 @@ def _resolve(tools: SwapTools, pair_id: Any) -> Any:
         return exc
 
 
-def _without_pair(pool: Pool, pair_id: int) -> Pool:
-    """Copy of `pool` without one pair and every edge touching it (ids of the rest preserved)."""
-    keep = [i for i, pid in enumerate(pool.ids) if pid != pair_id]
-    return Pool(
-        n=len(keep),
-        patient_abo=[pool.patient_abo[i] for i in keep],
-        donor_abo=[pool.donor_abo[i] for i in keep],
-        pra=[pool.pra[i] for i in keep],
-        ids=[pool.ids[i] for i in keep],
-        hard=[pool.hard[i] for i in keep],
-        seed=pool.seed,
-        edges=[(a, b) for a, b in pool.edges if a != pair_id and b != pair_id],
-    )
-
-
-def _prioritise(pool: Pool, pair_id: int) -> Pool:
-    """Copy of `pool` with one pair marked hard (PRA 0.90-like), so the priority weight hits it."""
-    hard = [
-        True if pid == pair_id else is_hard
-        for pid, is_hard in zip(pool.ids, pool.hard, strict=True)
-    ]
-    return replace(pool, hard=hard)
-
-
 def _add_altruistic_donor(
     tools: SwapTools, args: dict[str, Any], timer: Timer, max_len: int
 ) -> dict[str, Any]:
@@ -139,12 +157,21 @@ def _add_altruistic_donor(
     if donor_abo not in ABO_TYPES:
         raise ValueError(f"donor_abo must be one of {list(ABO_TYPES)}, got {donor_abo!r}")
 
-    pool = pool_from_graph(tools.graph)
     before = tools.best_set(max_len)["result"]
     flow_before = tools.flow_bound()["result"]["flow_bound"]
-    with _scratch(tools, pool, [(ALTRUIST_ID, str(donor_abo))]) as scratch:
-        after = scratch.best_set(max_len)["result"]
-        flow_after = scratch.flow_bound()["result"]["flow_bound"]
+    with _clone(tools) as clone:
+        started = perf_counter()
+        links = attach_altruist(clone.tools.graph, ALTRUIST_ID, str(donor_abo))
+        clone.mutations.append(
+            {
+                "name": "loader_altruist (+ edges, donor, flow arcs)",
+                "ms": round((perf_counter() - started) * 1000, 1),
+                "rows": links,
+            }
+        )
+        after = clone.tools.best_set(max_len)["result"]
+        flow_after = clone.tools.flow_bound()["result"]["flow_bound"]
+        scratch = clone.report()
 
     added, removed = _added_removed(before, after)
     timer.stop(after["candidate_chains"])
@@ -162,6 +189,7 @@ def _add_altruistic_donor(
         "gain": after["matched"] - before["matched"],
         "flow_bound": {"before": flow_before, "after": flow_after},
         "changed": {"added": added, "removed": removed},
+        "scratch": scratch,
     }
     if not after["candidate_chains"]:
         result["note"] = f"{EMPTY_NOTE} patient this donor can give to"
@@ -176,11 +204,16 @@ def _remove_pair(
     if isinstance(pair, UnknownEntity):
         return _unknown(timer, args, pair)
 
-    modified = _without_pair(pool_from_graph(tools.graph), pair.id)
     before = tools.best_set(max_len)["result"]
-    with _scratch(tools, modified) as scratch:
-        after = scratch.best_set(max_len)["result"]
-        pairs_after = scratch.n_pairs()
+    with _clone(tools) as clone:
+        clone.run("whatif_remove_pair_cycles", {"id": pair.id})
+        if clone.run("whatif_remove_pair", {"id": pair.id}) != 1:
+            raise RuntimeError(f"what-if copy: pair {pair.id} was not removed exactly once")
+        clone.run("whatif_remove_pair_donor", {"id": pair.id})
+        clone.run("whatif_remove_pair_patient", {"id": pair.id})
+        after = clone.tools.best_set(max_len)["result"]
+        pairs_after = clone.tools.n_pairs()
+        scratch = clone.report()
 
     added, removed = _added_removed(before, after)
     timer.stop(after["candidate_cycles"])
@@ -199,6 +232,7 @@ def _remove_pair(
         "after": {"matched": after["matched"], "pairs": pairs_after},
         "delta": after["matched"] - before["matched"],
         "changed": {"added": added, "removed": removed},
+        "scratch": scratch,
     }
     trace = build_trace(WHAT_IF_TOOL, args, timer)
     return envelope(_outcome(after), result, added, trace=trace)
@@ -212,10 +246,12 @@ def _set_priority(
         return _unknown(timer, args, pair)
     weight = float(args.get("weight", DEFAULT_PRIORITY_WEIGHT))
 
-    modified = _prioritise(pool_from_graph(tools.graph), pair.id)
     before = tools.best_set(max_len, priority=weight)["result"]
-    with _scratch(tools, modified) as scratch:
-        after = scratch.best_set(max_len, priority=weight)["result"]
+    with _clone(tools) as clone:
+        if clone.run("whatif_set_hard", {"id": pair.id}):
+            clone.run("whatif_bump_cycle_hard", {"id": pair.id})
+        after = clone.tools.best_set(max_len, priority=weight)["result"]
+        scratch = clone.report()
 
     added, removed = _added_removed(before, after)
     covered_after = {patient for cycle in after["chosen"] for patient in cycle}
@@ -231,6 +267,7 @@ def _set_priority(
         "delta": after["matched"] - before["matched"],
         "prioritised_pair_matched": pair.id in covered_after,
         "changed": {"added": added, "removed": removed},
+        "scratch": scratch,
     }
     trace = build_trace(WHAT_IF_TOOL, args, timer)
     return envelope(_outcome(after), result, added, trace=trace)

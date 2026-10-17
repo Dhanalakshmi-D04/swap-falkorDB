@@ -4,17 +4,25 @@ Nodes `(:Pair {id, patient_abo, donor_abo, pra, hard})`, edges `(:Pair)-[:CAN_GI
 plus a donor -> patient flow network (`:S`, `:Donor`, `:Patient`, `:T` joined by `:F {cap: 1}`)
 so `algo.maxFlow` can run. Every statement here is human-written and parameterised; each one
 returns the number of rows it created, and `load_pool` refuses to report success on a partial load.
+
+Once the pairs are in, FalkorDB turns every 2- and 3-way swap it can find into a swap object,
+`(:Cycle {key, len, members, hard, back_arcs, live, taken})-[:HAS {pos}]->(:Pair)`: the rings the
+planner chooses from, the ones a failed crossmatch kills, and the ones an approval takes, all live in
+the graph. `members[i]`'s donor gives to `members[i + 1]`'s patient (the last to the first), rotated
+so the smallest id comes first; `key` is the same ids joined by `>`.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any
 
 from falkordb import FalkorDB, Graph
 
+from swap import cache
 from swap.config import DEFAULT_GRAPH, Settings, settings
 from swap.generator import Pool
 
@@ -28,6 +36,7 @@ INDEX_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX FOR (p:Pair) ON (p.id)",
     "CREATE INDEX FOR (d:Donor) ON (d.id)",
     "CREATE INDEX FOR (p:Patient) ON (p.id)",
+    "CREATE INDEX FOR (c:Cycle) ON (c.key)",
 )
 
 CREATE_PAIRS = (
@@ -54,7 +63,33 @@ CREATE_SINK_EDGES = (
     "UNWIND $rows AS x MATCH (p:Patient {id: x}),(t:T) CREATE (p)-[:F {cap: 1}]->(t) RETURN count(*)"
 )
 
+# Swap objects. The pattern match canonicalises each directed cycle to its smallest id (as in
+# tools.FIND_CYCLES_2/3); `back_arcs` counts the reverse arcs inside a 3-way swap, each of which keeps
+# a 2-way swap alive if the third pair drops out (Manlove & O'Malley 2014, the UK scheme's criterion).
+MATERIALISE_2 = (
+    "MATCH (a:Pair)-[:CAN_GIVE]->(b:Pair)-[:CAN_GIVE]->(a) WHERE a.id < b.id "
+    "CREATE (c:Cycle {key: toString(a.id) + '>' + toString(b.id), len: 2, members: [a.id, b.id], "
+    "hard: (CASE WHEN a.hard THEN 1 ELSE 0 END) + (CASE WHEN b.hard THEN 1 ELSE 0 END), "
+    "back_arcs: 0, live: true, taken: false}) "
+    "CREATE (c)-[:HAS {pos: 0}]->(a), (c)-[:HAS {pos: 1}]->(b) RETURN count(c)"
+)
+MATERIALISE_3 = (
+    "MATCH (a:Pair)-[:CAN_GIVE]->(b:Pair)-[:CAN_GIVE]->(c:Pair)-[:CAN_GIVE]->(a) "
+    "WHERE a.id < b.id AND a.id < c.id "
+    "OPTIONAL MATCH (b)-[r1:CAN_GIVE]->(a) OPTIONAL MATCH (c)-[r2:CAN_GIVE]->(b) "
+    "OPTIONAL MATCH (a)-[r3:CAN_GIVE]->(c) "
+    "WITH a, b, c, (CASE WHEN r1 IS NULL THEN 0 ELSE 1 END) + (CASE WHEN r2 IS NULL THEN 0 ELSE 1 END)"
+    " + (CASE WHEN r3 IS NULL THEN 0 ELSE 1 END) AS back "
+    "CREATE (cy:Cycle {key: toString(a.id) + '>' + toString(b.id) + '>' + toString(c.id), len: 3, "
+    "members: [a.id, b.id, c.id], hard: (CASE WHEN a.hard THEN 1 ELSE 0 END) "
+    "+ (CASE WHEN b.hard THEN 1 ELSE 0 END) + (CASE WHEN c.hard THEN 1 ELSE 0 END), "
+    "back_arcs: back, live: true, taken: false}) "
+    "CREATE (cy)-[:HAS {pos: 0}]->(a), (cy)-[:HAS {pos: 1}]->(b), (cy)-[:HAS {pos: 2}]->(c) "
+    "RETURN count(cy)"
+)
+
 COUNT_PAIRS = "MATCH (p:Pair) RETURN count(p)"
+COUNT_CYCLES = "MATCH (c:Cycle) RETURN count(c)"
 COUNT_PAIR_EDGES = "MATCH ()-[r:CAN_GIVE]->() RETURN count(r)"
 COUNT_DONORS = "MATCH (d:Donor) RETURN count(d)"
 COUNT_PATIENTS = "MATCH (p:Patient) RETURN count(p)"
@@ -92,6 +127,7 @@ CYPHER: dict[str, str] = {
     "loader_index_pair": INDEX_STATEMENTS[0],
     "loader_index_donor": INDEX_STATEMENTS[1],
     "loader_index_patient": INDEX_STATEMENTS[2],
+    "loader_index_cycle": INDEX_STATEMENTS[3],
     "loader_pairs": CREATE_PAIRS,
     "loader_pair_edges": CREATE_PAIR_EDGES,
     "loader_source": CREATE_SOURCE_NODE,
@@ -101,6 +137,8 @@ CYPHER: dict[str, str] = {
     "loader_source_edges": CREATE_SOURCE_EDGES,
     "loader_flow_edges": CREATE_FLOW_EDGES,
     "loader_sink_edges": CREATE_SINK_EDGES,
+    "materialise_2": MATERIALISE_2,
+    "materialise_3": MATERIALISE_3,
     "loader_altruist": CREATE_ALTRUIST,
     "loader_altruist_edges": CREATE_ALTRUIST_EDGES,
     "loader_altruist_donor": CREATE_ALTRUIST_DONOR,
@@ -123,6 +161,12 @@ class LoadStats:
     flow_nodes: int
     flow_edges: int
     seconds: float
+    cycles_by_len: dict[int, int]
+    cycle_ms: dict[int, float]
+
+    @property
+    def cycles(self) -> int:
+        return sum(self.cycles_by_len.values())
 
     def summary(self) -> dict[str, object]:
         return {
@@ -131,7 +175,10 @@ class LoadStats:
             "edges": self.edges,
             "flow_nodes": self.flow_nodes,
             "flow_edges": self.flow_edges,
+            "cycles": self.cycles,
+            "cycles_by_len": self.cycles_by_len,
             "seconds": round(self.seconds, 3),
+            "cycle_ms": self.cycle_ms,
         }
 
 
@@ -156,6 +203,7 @@ def ensure_result_set_size(db: FalkorDB, size: int = RESULT_SET_SIZE) -> None:
 
 def drop_graph(db: FalkorDB, name: str) -> bool:
     """Delete a graph by name; False when it did not exist."""
+    cache.forget(name)
     if name in db.list_graphs():
         db.select_graph(name).delete()
         return True
@@ -174,6 +222,7 @@ def load_pool(
     ensure_result_set_size(db)
     started = perf_counter()
     drop_graph(db, name)
+    cache.forget(name)
     graph = db.select_graph(name)
     for statement in INDEX_STATEMENTS:
         graph.query(statement)
@@ -205,6 +254,13 @@ def load_pool(
     if created != expected:
         raise RuntimeError(f"graph {name!r} loaded partially: created {created}, wanted {expected}")
 
+    cycles_by_len: dict[int, int] = {}
+    cycle_ms: dict[int, float] = {}
+    for length, statement in ((2, MATERIALISE_2), (3, MATERIALISE_3)):
+        cycles_started = perf_counter()
+        cycles_by_len[length] = _count(graph, statement)
+        cycle_ms[length] = round((perf_counter() - cycles_started) * 1000, 1)
+
     return LoadStats(
         graph=name,
         pairs=created["pairs"],
@@ -214,7 +270,21 @@ def load_pool(
             created["source_edges"] + created["flow_edges"] + created["sink_edges"]
         ),
         seconds=perf_counter() - started,
+        cycles_by_len=cycles_by_len,
+        cycle_ms=cycle_ms,
     )
+
+
+def ensure_swap_objects(graph: Graph) -> dict[int, int]:
+    """Store the swap objects of a graph loaded before they existed (an old volume, say).
+
+    A graph that already holds any `:Cycle` is left alone. Returns the swaps created per length.
+    """
+    if _count(graph, COUNT_CYCLES):
+        return {}
+    with suppress(Exception):  # the index may already exist
+        graph.query(INDEX_STATEMENTS[3])
+    return {2: _count(graph, MATERIALISE_2), 3: _count(graph, MATERIALISE_3)}
 
 
 def graph_counts(graph: Graph) -> dict[str, int]:

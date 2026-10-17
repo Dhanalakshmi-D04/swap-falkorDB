@@ -60,19 +60,26 @@ def pack_cycles(
     hard_ids: Iterable[int] = (),
     priority_weight: float = 1.0,
     at_most_one_groups: Iterable[Iterable[int]] = (),
+    weights: Sequence[float] | None = None,
 ) -> PackResult:
     """Choose vertex-disjoint candidates maximising covered patients (weighted coverage).
 
     `candidates` are patient-id lists (cycles, or altruist chains). `at_most_one_groups` holds
-    groups of candidate indices of which at most one may be chosen.
+    groups of candidate indices of which at most one may be chosen. `weights`, when given, is the
+    objective per candidate (scores the graph stored); otherwise it is `cycle_weight`.
     """
     cycles: list[list[int]] = [[int(p) for p in c] for c in candidates]
     if not cycles:
         return PackResult([], 0, 0.0, "no candidate cycles", False)
 
     columns = len(cycles)
-    weights = np.array(
-        [cycle_weight(c, hard_ids, priority_weight) for c in cycles], dtype=float
+    if weights is not None and len(weights) != columns:
+        raise ValueError(f"got {len(weights)} weights for {columns} candidates")
+    objective_weights = np.array(
+        weights
+        if weights is not None
+        else [cycle_weight(c, hard_ids, priority_weight) for c in cycles],
+        dtype=float,
     )
     patients = sorted({patient for cycle in cycles for patient in cycle})
     row_of = {patient: row for row, patient in enumerate(patients)}
@@ -87,7 +94,7 @@ def pack_cycles(
 
     constraints = LinearConstraint(coverage.tocsr(), -np.inf, 1.0)
     solution = milp(
-        c=-weights,
+        c=-objective_weights,
         constraints=constraints,
         integrality=np.ones(columns),
         bounds=Bounds(0, 1),

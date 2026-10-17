@@ -35,6 +35,8 @@ TOOL_ORDER: tuple[str, ...] = (
     "explain_unmatched",
     "what_if",
     "draft_plan",
+    "failure_impact",
+    "draft_repair",
 )
 
 MODE_LLM = "llm"
@@ -136,12 +138,14 @@ class ToolCatalogue:
         """The unbounded cycle optimum (cycles of any length), for the proof panel."""
         return self.tools.true_cycle_optimum()
 
-    def explain_unmatched(self, pair_id: int) -> dict[str, Any]:
-        """Who could give to this pair's patient, why others cannot, and its cycles.
+    def explain_unmatched(self, pair_id: int, plan_id: int | None = None) -> dict[str, Any]:
+        """Why this pair is or is not in a swap: a verdict with graph evidence.
 
-        An id the graph does not hold answers outcome `unknown_entity`.
+        Blocked by chosen swaps (named), a shortest ring longer than 3 pairs, a donor who can give
+        to nobody, or swaps killed by failed crossmatches. Explained against `plan_id`, else the
+        latest plan, else the best set. An unknown id answers outcome `unknown_entity`.
         """
-        return self.tools.explain_unmatched(int(pair_id))
+        return self.tools.explain_unmatched(int(pair_id), None if plan_id is None else int(plan_id))
 
     def what_if(
         self,
@@ -162,14 +166,40 @@ class ToolCatalogue:
         return self.tools.what_if(kind, args)
 
     def draft_plan(
-        self, max_len: Literal[2, 3, 4] = 3, priority: float | None = None
+        self, max_len: Literal[2, 3] = 3, priority: float | None = None
     ) -> dict[str, Any]:
         """Draft a swap plan for a coordinator and record it in the graph as a DRAFT.
 
-        Skips pairs already committed by an approved plan. You can only draft: approving or
+        Uses only swaps still available (none killed by a failed crossmatch, no pair committed by an
+        approved plan); FalkorDB checks the set before writing. You can only draft: approving or
         rejecting a plan is a human action you cannot perform.
         """
         return self.tools.draft_plan(int(max_len), priority)
+
+    def failure_impact(self, crossmatch_id: int | None = None) -> dict[str, Any]:
+        """What a recorded crossmatch result broke, from the graph (default: the latest result).
+
+        Returns the swaps it killed, the planned swaps that broke, the stranded patients, the 2-way
+        swap still alive inside a broken 3-way swap, and the options left. You cannot record a
+        result: that is a human action.
+        """
+        return self.tools.failure_impact(self._crossmatch(crossmatch_id))
+
+    def draft_repair(
+        self, crossmatch_id: int | None = None, max_len: Literal[2, 3] = 3
+    ) -> dict[str, Any]:
+        """Draft a REPAIR plan after a failed crossmatch (default: the latest result).
+
+        Uses only swaps still alive in the graph and re-matches the stranded patients first. It is
+        a draft: approving it is a human action you cannot perform.
+        """
+        return self.tools.draft_repair(self._crossmatch(crossmatch_id), int(max_len))
+
+    def _crossmatch(self, crossmatch_id: int | None) -> int:
+        if crossmatch_id is not None:
+            return int(crossmatch_id)
+        tests = self.tools.list_crossmatches()["result"]["crossmatches"]
+        return tests[-1]["id"] if tests else 0
 
     def dispatch(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         """Execute one tool by name with already-parsed arguments."""
@@ -211,6 +241,16 @@ def _known_ids(env: dict[str, Any]) -> set[int]:
         values = result.get(key)
         if isinstance(values, list):
             ids.update(int(value) for value in values if isinstance(value, int))
+    for key in ("still_waiting",):
+        values = result.get(key)
+        if isinstance(values, list):
+            ids.update(int(value) for value in values if isinstance(value, int))
+    for stranded in result.get("stranded") or []:
+        if isinstance(stranded, dict) and isinstance(stranded.get("id"), int):
+            ids.add(stranded["id"])
+    test = result.get("crossmatch")
+    if isinstance(test, dict):
+        ids.update(test[key] for key in ("donor_pair", "patient_pair") if isinstance(test.get(key), int))
     pair = result.get("pair")
     if isinstance(pair, dict) and isinstance(pair.get("id"), int):
         ids.add(pair["id"])
@@ -430,6 +470,10 @@ def route(question: str) -> list[tuple[str, dict[str, Any]]]:
 
     if pair_id is not None and any(word in text for word in ("explain", "why", "unmatched")):
         return [("explain_unmatched", {"pair_id": pair_id})]
+    if "repair" in text or "re-match" in text or "rematch" in text:
+        return [("draft_repair", {"max_len": min(max_len, 3)})]
+    if any(word in text for word in ("crossmatch", "cross-match", "failed", "stranded", "broke")):
+        return [("failure_impact", {})]
     if any(word in text for word in ("draft", "sign-off", "sign off", "signoff")):
         return [("draft_plan", {"max_len": max_len})]
     if any(word in text for word in ("bound", "flow", "maxflow", "max flow")):
@@ -486,12 +530,13 @@ def summarize(name: str, env: dict[str, Any]) -> str:
         pair = result.get("pair") or {}
         if not pair:
             return f"the graph does not hold that pair. Outcome: {outcome}."
-        incoming = ", ".join(str(value) for value in result.get("incoming_candidates") or []) or "none"
-        outgoing = ", ".join(str(value) for value in result.get("outgoing_targets") or []) or "none"
+        incoming = len(result.get("incoming_candidates") or [])
+        outgoing = len(result.get("outgoing_targets") or [])
         return (
             f"pair {pair.get('id')} (patient {pair.get('patient_abo')}, donor "
-            f"{pair.get('donor_abo')}): donors that could give to this patient are {incoming}; "
-            f"this pair's donor could give to {outgoing}. Outcome: {outcome}."
+            f"{pair.get('donor_abo')}): {incoming} donors could give to this patient and this pair's "
+            f"donor could give to {outgoing} patients. {result.get('summary', '')} "
+            f"Outcome: {outcome}."
         )
     if name == "draft_plan":
         plan = result.get("plan") or {}
@@ -501,6 +546,30 @@ def summarize(name: str, env: dict[str, Any]) -> str:
             f"drafted plan {plan.get('id')}: {plan.get('swaps')} swaps covering "
             f"{plan.get('matched')} patients. It is only a draft until a person approves it. "
             f"Outcome: {outcome}."
+        )
+    if name == "failure_impact":
+        test = result.get("crossmatch") or {}
+        if not test:
+            return f"the graph does not know of that crossmatch result. Outcome: {outcome}."
+        broken = ", ".join(b["key"] for b in result.get("broken_planned_swaps") or []) or "none"
+        waiting = ", ".join(str(v) for v in result.get("still_waiting") or []) or "nobody"
+        rescue = ", ".join(r["rescue"] for r in result.get("rescue") or []) or "none"
+        return (
+            f"the {test.get('result')} crossmatch from donor of pair {test.get('donor_pair')} to "
+            f"patient of pair {test.get('patient_pair')} killed {result.get('swaps_killed', 0)} "
+            f"stored swaps; planned swaps broken: {broken}; still waiting: {waiting}; 2-way swap "
+            f"still alive inside a broken 3-way: {rescue}. Outcome: {outcome}."
+        )
+    if name == "draft_repair":
+        repair = result.get("repair") or {}
+        plan = result.get("plan") or {}
+        if not plan:
+            return f"no repair was drafted: {result.get('note', '')}. Outcome: {outcome}."
+        rematched = ", ".join(str(v) for v in repair.get("rematched") or []) or "nobody"
+        waiting = ", ".join(str(v) for v in repair.get("still_waiting") or []) or "nobody"
+        return (
+            f"drafted repair plan {plan.get('id')}: re-matches {rematched}; still waiting: "
+            f"{waiting}. It is only a draft until a person approves it. Outcome: {outcome}."
         )
     if name == "what_if":
         before = (result.get("before") or {}).get("matched")

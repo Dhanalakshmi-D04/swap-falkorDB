@@ -28,6 +28,9 @@ CATALOGUE = {
     "draft_plan",
     "get_plan",
     "list_plans",
+    "failure_impact",
+    "draft_repair",
+    "list_crossmatches",
 }
 VALID = {outcome.value for outcome in Outcome}
 
@@ -69,6 +72,8 @@ async def _exercise() -> None:
             ("true_cycle_optimum", {}),
             ("explain_unmatched", {"pair_id": 0}),
             ("what_if", {"kind": "remove_pair", "pair_id": 0}),
+            ("list_crossmatches", {}),
+            ("failure_impact", {"crossmatch_id": 1}),
         ):
             env = (await client.call_tool(name, arguments)).structured_content
             assert env is not None, name

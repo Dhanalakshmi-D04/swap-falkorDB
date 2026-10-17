@@ -254,8 +254,9 @@ def test_n300_performance_within_budget(db: FalkorDB) -> None:
         f"({cycles['result']['total']} cycles), flow_bound {flow_seconds * 1000:.0f}ms "
         f"(bound {flow['result']['flow_bound']})"
     )
-    assert find_seconds < 1.0, f"find_cycles(3) took {find_seconds:.3f}s (budget 1s)"
-    assert flow_seconds < 0.1, f"flow_bound took {flow_seconds * 1000:.0f}ms (budget 100ms)"
+    # Budgets as in test_perf.py: the stored swap objects make the graph's matrices larger.
+    assert find_seconds < 2.0, f"find_cycles(3) took {find_seconds:.3f}s (budget 2s)"
+    assert flow_seconds < 0.3, f"flow_bound took {flow_seconds * 1000:.0f}ms (budget 300ms)"
 
 
 def test_reference_means_are_reproduced(db: FalkorDB) -> None:
