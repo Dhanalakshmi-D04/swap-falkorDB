@@ -24,7 +24,9 @@ from swap import crosscheck
 from swap.agent import run_agent
 from swap.config import DEFAULT_ACTIVE_GRAPH
 from swap.generator import generate_pool as draw_pool
+from swap.graph import CYPHER as LOADER_CYPHER
 from swap.graph import connect, graph_counts, load_pool, pool_from_graph
+from swap.tools import CYPHER as TOOL_CYPHER
 from swap.tools import SwapTools
 
 ACTIVE_GRAPH = DEFAULT_ACTIVE_GRAPH
@@ -220,6 +222,12 @@ def proof() -> dict[str, Any]:
 def trace() -> dict[str, Any]:
     """The last (up to 200) tool traces: `{tool, args, ms, rows, outcome}`."""
     return {"limit": TRACE_LIMIT, "count": len(_traces), "traces": list(_traces)}
+
+
+@app.get("/cypher")
+def cypher() -> dict[str, Any]:
+    """Every human-written Cypher statement the product runs, named (tool queries + pool loader)."""
+    return {"queries": {**LOADER_CYPHER, **TOOL_CYPHER}}
 
 
 @app.get("/graph")

@@ -3,150 +3,448 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="description" content="Swap finds kidney-swap chains in a graph of synthetic patient-donor pairs and shows exactly why." />
   <title>swap · kidney paired exchange (synthetic)</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-  <header class="topbar">
-    <h1>swap</h1>
-    <p class="sub">
-      Kidney paired-exchange decision support on a FalkorDB graph.
-      Cycles and the max-flow bound are produced <strong>by FalkorDB</strong>.
-    </p>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <svg class="svg-defs" width="0" height="0" aria-hidden="true" focusable="false">
+    <defs>
+      <marker id="arrowhead" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" class="svg-arrowhead"></path>
+      </marker>
+    </defs>
+  </svg>
+
+  <header class="nav" id="topnav">
+    <div class="nav-inner">
+      <a class="brand" href="#hero">swap<span class="brand-dot"></span></a>
+      <nav class="nav-links" aria-label="Sections">
+        <a href="#how">How it works</a>
+        <a href="#result">The result</a>
+        <a href="#swaps">The swaps</a>
+        <a href="#leftout">Left out</a>
+        <a href="#whatif">What if?</a>
+        <a href="#hood" class="nav-hood">Under the hood</a>
+      </nav>
+      <button type="button" class="btn btn-ghost js-demo">Watch demo</button>
+    </div>
   </header>
 
-  <main>
-    <section class="panel controls" aria-label="pool controls">
-      <div class="control">
-        <label for="size">Pool size <span id="size-value">120</span> pairs</label>
-        <input id="size" type="range" min="30" max="300" step="1" value="120" />
+  <main id="main">
+    <!-- 1. HERO ---------------------------------------------------------------- -->
+    <section id="hero" class="hero">
+      <p class="notice" role="note">
+        <span class="notice-mark" aria-hidden="true">!</span>
+        Synthetic patients only. Not medical advice.
+      </p>
+      <h1>Finding kidneys by swapping donors</h1>
+      <p class="hero-lead">
+        Some patients have a willing kidney donor who is the wrong match. Swap finds chains of
+        donor swaps so more people get a kidney, and shows exactly why.
+      </p>
+      <div class="hero-actions">
+        <button type="button" id="demo-start" class="btn btn-primary js-demo">Watch the demo story</button>
+        <button type="button" id="explore" class="btn">Explore it yourself</button>
       </div>
-      <div class="control">
-        <label for="seed">Seed</label>
-        <input id="seed" type="number" value="1" min="0" step="1" />
-      </div>
-      <div class="control">
-        <button id="generate" class="primary">Generate</button>
-      </div>
-      <div class="control">
-        <span class="label">Swap length</span>
-        <div class="segmented" role="group" aria-label="swap length">
-          <button type="button" data-len="2" class="seg">2</button>
-          <button type="button" data-len="3" class="seg active">3</button>
-        </div>
-      </div>
-      <div class="control">
-        <label class="check">
-          <input id="priority" type="checkbox" />
-          Prioritise highly sensitised (PRA 0.90)
-        </label>
-        <input id="weight" type="range" min="1" max="5" step="0.5" value="2" />
-        <span class="muted">weight <span id="weight-value">2</span></span>
-      </div>
+      <ul class="hero-facts" aria-label="At a glance">
+        <li><span class="dot dot-graph"></span>Every answer walks a real graph database (FalkorDB)</li>
+        <li><span class="dot dot-proof"></span>Every number is checked against an independent count</li>
+        <li><span class="dot dot-plain"></span>You never have to read a query to use it</li>
+      </ul>
     </section>
 
-    <section class="metrics" aria-label="live numbers">
-      <div class="metric">
-        <span class="metric-value" id="metric-matched">–</span>
-        <span class="metric-label">patients matched</span>
+    <!-- 2. HOW IT WORKS -------------------------------------------------------- -->
+    <section id="how" class="section">
+      <div class="section-head">
+        <h2>How it works</h2>
+        <p class="section-sub">Three ideas are enough to follow the whole page.</p>
       </div>
-      <div class="metric">
-        <span class="metric-value" id="metric-cycles">–</span>
-        <span class="metric-label">cycles chosen</span>
-      </div>
-      <div class="metric">
-        <span class="metric-value" id="metric-maxlen">–</span>
-        <span class="metric-label">max cycle length</span>
-      </div>
-      <div class="metric wide">
-        <span class="metric-value" id="metric-outcome">–</span>
-        <span class="metric-label">best_set outcome</span>
-      </div>
+      <ol class="steps">
+        <li class="step">
+          <div class="step-art" aria-hidden="true">
+            <svg viewBox="0 0 200 120" role="img" aria-label="A patient and their donor whose match fails">
+              <line x1="52" y1="60" x2="148" y2="60" class="svg-fail" />
+              <circle cx="40" cy="60" r="22" class="svg-node svg-patient" />
+              <text x="40" y="65" class="svg-label">A</text>
+              <circle cx="160" cy="60" r="22" class="svg-node svg-donor" />
+              <text x="160" y="65" class="svg-label svg-on">O</text>
+              <text x="100" y="30" class="svg-caption svg-center">no match</text>
+            </svg>
+          </div>
+          <div class="step-body">
+            <span class="step-num">1</span>
+            <h3>A pair, but no match</h3>
+            <p>
+              A patient (left) has a willing donor (right). Often the blood type or the patient's
+              immune response (<span class="term" title="Sensitisation: the patient's immune system reacts against many donors, so fewer donors are compatible. Measured as PRA, panel-reactive antibody percent.">sensitisation</span>)
+              means the donor cannot give to <em>their own</em> patient.
+            </p>
+          </div>
+        </li>
+        <li class="step">
+          <div class="step-art" aria-hidden="true">
+            <svg viewBox="0 0 200 140" role="img" aria-label="A 2-way swap and a 3-way ring of swaps">
+              <g class="svg-group">
+                <circle cx="35" cy="40" r="16" class="svg-node svg-patient" /><text x="35" y="44" class="svg-label">A</text>
+                <circle cx="100" cy="40" r="16" class="svg-node svg-donor" /><text x="100" y="44" class="svg-label svg-on">O</text>
+                <path d="M51 34 Q67 18 84 34" class="svg-arc" />
+                <path d="M84 50 Q67 66 51 50" class="svg-arc" />
+              </g>
+              <text x="150" y="44" class="svg-caption">2-way</text>
+              <g class="svg-group">
+                <circle cx="35" cy="112" r="13" class="svg-node svg-patient" /><text x="35" y="116" class="svg-label svg-tiny">A</text>
+                <circle cx="100" cy="112" r="13" class="svg-node svg-patient" /><text x="100" y="116" class="svg-label svg-tiny">B</text>
+                <circle cx="68" cy="88" r="13" class="svg-node svg-donor" /><text x="68" y="92" class="svg-label svg-tiny svg-on">O</text>
+                <path d="M47 102 L56 95" class="svg-arc" />
+                <path d="M80 95 L89 102" class="svg-arc" />
+                <path d="M86 122 L49 122" class="svg-arc" />
+              </g>
+              <text x="150" y="116" class="svg-caption">3-way</text>
+            </svg>
+          </div>
+          <div class="step-body">
+            <span class="step-num">2</span>
+            <h3>Swap donors, not kidneys</h3>
+            <p>
+              If two pairs swap donors, both patients get one (<strong>2-way</strong>). Add a third
+              pair and they can swap in a ring (<strong>3-way</strong>). More pairs allowed, more
+              patients matched.
+            </p>
+          </div>
+        </li>
+        <li class="step">
+          <div class="step-art" aria-hidden="true">
+            <svg viewBox="0 0 200 140" role="img" aria-label="A graph of pairs with the best ring highlighted">
+              <g class="svg-edges">
+                <line x1="40" y1="40" x2="100" y2="30" />
+                <line x1="100" y1="30" x2="160" y2="50" />
+                <line x1="40" y1="40" x2="90" y2="95" />
+                <line x1="90" y1="95" x2="160" y2="50" />
+                <line x1="160" y1="50" x2="150" y2="115" />
+                <line x1="90" y1="95" x2="150" y2="115" />
+                <line x1="40" y1="40" x2="150" y2="115" />
+              </g>
+              <path d="M100 30 L160 50 L90 95 Z" class="svg-best" />
+              <circle cx="40" cy="40" r="13" class="svg-node" />
+              <circle cx="100" cy="30" r="13" class="svg-node svg-best-node" />
+              <circle cx="160" cy="50" r="13" class="svg-node svg-best-node" />
+              <circle cx="90" cy="95" r="13" class="svg-node svg-best-node" />
+              <circle cx="150" cy="115" r="13" class="svg-node" />
+            </svg>
+          </div>
+          <div class="step-body">
+            <span class="step-num">3</span>
+            <h3>The graph finds every swap</h3>
+            <p>
+              The graph database (FalkorDB) finds every possible swap, then a solver picks the best
+              set that shares no patient. The highlighted ring is one such choice.
+            </p>
+          </div>
+        </li>
+      </ol>
     </section>
 
-    <div class="row">
-      <section class="panel graph-panel" aria-label="graph view">
-        <div class="panel-head">
-          <h2>Chosen cycles</h2>
-          <span class="muted" id="graph-note">only the chosen cycles, one colour per cycle</span>
-        </div>
-        <div class="graph-body">
-          <div id="cy" class="cy"></div>
-          <aside class="unmatched">
-            <h3>Unmatched patients <span id="unmatched-count" class="muted"></span></h3>
-            <p class="muted small">Click one to ask the graph why.</p>
-            <ul id="unmatched-list"></ul>
-          </aside>
-        </div>
-      </section>
-
-      <section class="panel side" aria-label="comparison and explanation">
-        <div class="panel-head"><h2>Comparison</h2></div>
-        <table class="compare">
-          <thead>
-            <tr><th>Strategy</th><th>Patients matched</th><th>Note</th></tr>
-          </thead>
-          <tbody id="compare-body">
-            <tr><td>2-way</td><td id="cmp-2">–</td><td class="muted">cycles of length 2 only</td></tr>
-            <tr><td>up to 3</td><td id="cmp-3">–</td><td class="muted">2- and 3-cycles</td></tr>
-            <tr><td>true cycle optimum</td><td id="cmp-cover">–</td><td class="muted">cycles of any length</td></tr>
-            <tr><td>max-flow bound</td><td id="cmp-bound">–</td><td class="muted">upper bound, also allows chains; not the cycle optimum</td></tr>
-          </tbody>
-        </table>
-        <p class="muted small" id="ordering-note"></p>
-
-        <div class="panel-head"><h2>Explain a patient</h2></div>
-        <div id="explain" class="explain">
-          <p class="muted">Pick an unmatched patient, or ask for an id below.</p>
-        </div>
-        <div class="control inline">
-          <input id="ask-id" type="number" placeholder="e.g. 99999" />
-          <button id="ask" type="button">Ask</button>
-        </div>
-
-        <div class="panel-head"><h2>What-if</h2></div>
-        <div class="control inline">
-          <button id="whatif" type="button">Add one altruistic O donor</button>
-        </div>
-        <div id="whatif-out" class="explain"></div>
-      </section>
-    </div>
-
-    <section class="panel" aria-label="ask the agent">
-      <div class="panel-head">
-        <h2>Ask the agent</h2>
-        <span class="muted" id="ask-mode">tool mode (no LLM configured)</span>
-      </div>
-      <div class="control inline">
-        <input id="q" type="text" style="width:340px" placeholder="e.g. who can be matched at up to 3-way?" />
-        <button id="ask-agent" class="primary" type="button">Ask</button>
-      </div>
-      <div id="ask-out" class="explain">
-        <p class="muted small">
-          The model only picks a tool and fills typed arguments; it never writes Cypher. With no
-          <code>LLM_*</code> env set, a keyword router answers instead.
+    <!-- 3. THE BIG RESULT ------------------------------------------------------ -->
+    <section id="result" class="section">
+      <div class="section-head">
+        <h2>The big result</h2>
+        <p class="section-sub">
+          Allowing 3-way swaps instead of only 2-way swaps matches more people. Live numbers from
+          the pool currently loaded in the graph.
         </p>
       </div>
+
+      <div class="result-grid">
+        <div class="result-cards">
+          <article class="card stat">
+            <p class="stat-label">2-way swaps</p>
+            <p class="stat-value"><span id="n2" aria-live="polite">–</span><span class="stat-unit">people matched</span></p>
+          </article>
+          <article class="card stat stat-accent">
+            <p class="stat-label">Allowing 3-way swaps</p>
+            <p class="stat-value"><span id="n3" aria-live="polite">–</span><span class="stat-unit">people matched</span></p>
+          </article>
+          <article class="card stat stat-gain">
+            <p class="stat-label">The difference</p>
+            <p class="stat-value"><span id="gain" aria-live="polite">–</span><span class="stat-unit">more people get a kidney</span></p>
+          </article>
+          <div class="bars" aria-hidden="true">
+            <div class="bar-row">
+              <span class="bar-name">2-way</span>
+              <span class="bar-track"><span class="bar-fill bar-fill-2" id="bar2"></span></span>
+            </div>
+            <div class="bar-row">
+              <span class="bar-name">3-way</span>
+              <span class="bar-track"><span class="bar-fill bar-fill-3" id="bar3"></span></span>
+            </div>
+          </div>
+          <p class="fine-print" id="result-status">Loading the current pool…</p>
+          <p class="fine-print">
+            Watch out: the "best possible" figure we sometimes quote is an
+            <span class="term" title="A max-flow bound counts a matching that also allows chains starting at an altruistic donor (a donor with no patient). It can be higher than any set of swaps, so we treat it as an upper bound.">upper bound</span>
+            that also allows chains, so it is not a set of swaps you could actually perform.
+          </p>
+        </div>
+
+        <aside class="card controls" aria-label="Pool controls">
+          <h3>Set up a pool</h3>
+          <p class="muted small">
+            A pool is a batch of synthetic patient–donor pairs. Change it, and every number on this
+            page updates.
+          </p>
+          <div class="field">
+            <label for="size">How many patient–donor pairs? <span id="size-value" class="pill">200</span></label>
+            <input id="size" type="range" min="20" max="300" step="1" value="200" />
+            <span class="hint">More pairs make the problem bigger and the graph busier.</span>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="seed">Random seed</label>
+              <input id="seed" type="number" value="1000" min="0" step="1" inputmode="numeric" />
+              <span class="hint">Same seed, same pool, every time.</span>
+            </div>
+            <div class="field">
+              <span class="label" id="len-label">Longest swap allowed</span>
+              <div class="segmented" id="len-toggle" role="group" aria-labelledby="len-label">
+                <button type="button" class="seg" data-len="2">2-way</button>
+                <button type="button" class="seg" data-len="3">3-way</button>
+              </div>
+              <span class="hint">2-way = pairs swap back and forth. 3-way = rings of three.</span>
+            </div>
+          </div>
+          <button type="button" id="generate" class="btn btn-primary btn-block">Generate new pool</button>
+          <p class="muted small" id="pool-line">–</p>
+        </aside>
+      </div>
     </section>
 
-    <section class="panel" aria-label="proof panel">
-      <div class="panel-head">
-        <h2>Proof</h2>
-        <span class="muted" id="proof-note">FalkorDB numbers vs an independent plain-Python check</span>
+    <!-- 4. THE SWAPS FOUND ----------------------------------------------------- -->
+    <section id="swaps" class="section">
+      <div class="section-head">
+        <h2>The swaps found</h2>
+        <p class="section-sub">
+          One card per chosen swap. Each card is a small loop of pairs:
+          <span class="legend"><span class="legend-node svg-pair"></span>a patient–donor pair</span>
+          <span class="legend"><span class="legend-arrow">→</span>"donor gives to"</span>
+        </p>
       </div>
-      <div id="proof" class="proof"></div>
+      <div class="toolbar">
+        <div class="chips" id="swap-chips" role="group" aria-label="Filter swaps by length">
+          <button type="button" class="chip is-active" data-filter="all">All</button>
+          <button type="button" class="chip" data-filter="2">2-way</button>
+          <button type="button" class="chip" data-filter="3">3-way</button>
+        </div>
+        <span class="muted small" id="swap-count">–</span>
+      </div>
+      <div id="swap-status" class="status" role="status">Loading swaps…</div>
+      <div id="swap-grid" class="swap-grid"></div>
+
+      <div class="card detail" id="swap-detail">
+        <div class="detail-text">
+          <h3 id="detail-title">Pick a swap</h3>
+          <p id="detail-sentence" class="muted">
+            Click any card above and this panel explains, in plain words, who gives a kidney to whom.
+          </p>
+        </div>
+        <div id="detail-graph" class="detail-graph" aria-hidden="true"></div>
+      </div>
     </section>
 
-    <section class="panel" aria-label="trace panel">
-      <div class="panel-head">
-        <h2>Trace</h2>
-        <span class="muted">the last tool calls (tool, args, ms, rows)</span>
+    <!-- 5. WHO IS LEFT OUT ----------------------------------------------------- -->
+    <section id="leftout" class="section">
+      <div class="section-head">
+        <h2>Who is left out, and why</h2>
+        <p class="section-sub">
+          These patients were not matched in the chosen set.
+          <span class="term" title="Sensitisation is when a patient's immune system rejects many donors, so fewer donors can safely give to them. It is measured as PRA (panel-reactive antibody percent); higher means harder to match.">Sensitisation</span>
+          is why some are so hard to place.
+        </p>
       </div>
-      <div id="trace" class="trace"></div>
+      <div class="leftout-grid">
+        <div class="card unmatched-card">
+          <div class="card-head">
+            <h3>Unmatched patients <span id="unmatched-count" class="pill">–</span></h3>
+          </div>
+          <div id="unmatched-status" class="status" role="status">Loading…</div>
+          <div id="unmatched-rows" class="rows"></div>
+        </div>
+        <div class="card ask-card">
+          <h3>Ask about any patient</h3>
+          <p class="muted small">
+            Type any pair id and the graph will explain what it knows, sentence by sentence.
+          </p>
+          <div class="field-row">
+            <label class="sr-only" for="id-input">Patient id</label>
+            <input id="id-input" type="number" placeholder="e.g. 17" inputmode="numeric" />
+            <button type="button" id="id-ask" class="btn btn-primary">Explain</button>
+          </div>
+          <button type="button" id="id-missing" class="btn btn-ghost btn-block">
+            Try an id that does not exist (99999)
+          </button>
+          <p class="fine-print">
+            An id the graph never held answers "that patient does not exist" — which is different
+            from "not matched".
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 6. WHAT IF ------------------------------------------------------------- -->
+    <section id="whatif" class="section">
+      <div class="section-head">
+        <h2>What if?</h2>
+        <p class="section-sub">
+          Ask the graph a counter-factual. It re-runs the whole search on a modified copy of the
+          pool and shows what changed.
+        </p>
+      </div>
+      <div class="whatif-grid">
+        <div class="card">
+          <h3>Try a change</h3>
+          <button type="button" id="whatif-altruist" class="btn btn-block">
+            Add one altruistic donor with blood type O
+          </button>
+          <p class="fine-print">
+            An <span class="term" title="An altruistic donor is a donor with no patient of their own. They can start a chain of donations.">altruistic donor</span>
+            has no patient, so they can start a chain instead of a closed ring.
+          </p>
+          <div class="field-row tight">
+            <label class="sr-only" for="remove-pair">Pair to remove</label>
+            <select id="remove-pair"></select>
+            <button type="button" id="whatif-remove" class="btn">Remove a pair</button>
+          </div>
+          <div id="whatif-out" class="output"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h3>Fairness</h3>
+          </div>
+          <label class="switch" for="fairness">
+            <input id="fairness" type="checkbox" />
+            <span>Give extra priority to patients who are hardest to match</span>
+          </label>
+          <p class="fine-print">
+            When on, the chosen swaps favour highly sensitised patients instead of just the largest
+            total.
+          </p>
+          <div id="fairness-live" class="output"></div>
+          <div id="fairness-panel" class="fairness-panel"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 7. UNDER THE HOOD ------------------------------------------------------ -->
+    <section id="hood" class="section">
+      <details class="hood-details">
+        <summary>
+          <span>Under the hood — every answer shows its work</span>
+          <span class="summary-hint">trace, proof, Cypher, and the agent</span>
+        </summary>
+
+        <div class="hood-body">
+          <div class="hood-item">
+            <div class="card-head">
+              <h3>Trace — the tool calls behind the page</h3>
+              <button type="button" id="trace-refresh" class="btn btn-ghost btn-sm">Refresh</button>
+            </div>
+            <p class="fine-print">
+              Every request the page makes is a tool call with typed arguments. This is the log:
+              which tool, with what arguments, how long it took, how many rows came back.
+            </p>
+            <div id="trace-status" class="status" role="status"></div>
+            <div id="trace" class="table-wrap"></div>
+          </div>
+
+          <div class="hood-item">
+            <h3>Proof — FalkorDB vs an independent check</h3>
+            <p class="fine-print">
+              A second, independent plain-Python count runs on the same pool. When the graph agrees,
+              you get a tick; if they ever disagree, the check says so instead.
+            </p>
+            <div id="proof-status" class="status" role="status"></div>
+            <div id="proof" class="proof"></div>
+          </div>
+
+          <div class="hood-item">
+            <h3>Cypher — the queries the tools run</h3>
+            <p class="fine-print">
+              The model never writes these. They are human-written, parameterised statements.
+              Click one to read it.
+            </p>
+            <div id="cypher-status" class="status" role="status"></div>
+            <div id="cypher" class="cypher"></div>
+          </div>
+
+          <div class="hood-item">
+            <div class="card-head">
+              <h3>Ask the agent</h3>
+              <span class="muted small" id="ask-mode">tool mode — keyword router, no LLM configured</span>
+            </div>
+            <div class="field-row">
+              <label class="sr-only" for="q">Your question</label>
+              <input id="q" type="text" placeholder="e.g. who can be matched at up to 3-way?" />
+              <button type="button" id="ask-agent" class="btn btn-primary">Ask</button>
+            </div>
+            <div id="ask-chips" class="chips chips-wrap" aria-label="Suggested questions"></div>
+            <div id="ask-out" class="output"></div>
+          </div>
+        </div>
+      </details>
     </section>
   </main>
 
-  <footer class="footer">Synthetic patients only. Not medical advice.</footer>
+  <!-- 9. FOOTER ---------------------------------------------------------------- -->
+  <footer class="footer">
+    <div class="footer-inner">
+      <div>
+        <h4>Honest limits</h4>
+        <ul class="limits">
+          <li><strong>Synthetic data only.</strong> Every patient is generated from a seed; nothing here is a real person.</li>
+          <li><strong>A known result, reproduced.</strong> The 2-way vs 3-way effect is the finding of Roth, Sönmez and Ünver (2007). We re-implement it; we do not discover it.</li>
+          <li><strong>Part of the work happens outside the database.</strong> FalkorDB finds the candidate swaps, the bound and the explanations; a separate integer-program solver picks the best set.</li>
+          <li><strong>The upper bound is not a plan.</strong> The max-flow figure also allows chains, so it is not a set of swaps you could perform.</li>
+          <li><strong>Not medical advice.</strong> Decision support for a coordinator, on synthetic data, with no clinical validation.</li>
+        </ul>
+      </div>
+      <div class="footer-meta">
+        <p>
+          Built with AI assistance. Every number on this page can be reproduced from the repository,
+          and the assistance is disclosed in <strong>AI_USE.md</strong>.
+        </p>
+        <p class="muted small">Measured results and the fairness study: see the README.</p>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Side panel for explanations ------------------------------------------- -->
+  <div id="drawer-backdrop" class="backdrop" hidden></div>
+  <aside id="drawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" hidden>
+    <div class="drawer-head">
+      <h3 id="drawer-title">Explain a patient</h3>
+      <button type="button" id="drawer-close" class="btn btn-ghost btn-sm" aria-label="Close panel">Close</button>
+    </div>
+    <div id="drawer-body" class="drawer-body"></div>
+  </aside>
+
+  <!-- Guided demo overlay ---------------------------------------------------- -->
+  <div id="demo" class="demo" hidden>
+    <div class="demo-card" role="dialog" aria-modal="true" aria-labelledby="demo-title">
+      <div class="demo-top">
+        <h3 id="demo-title">Guided demo</h3>
+        <span class="muted small" id="demo-progress">Step 1 of 1</span>
+        <button type="button" id="demo-skip" class="btn btn-ghost btn-sm">Skip</button>
+      </div>
+      <p id="demo-caption" class="demo-caption">–</p>
+      <div class="demo-actions">
+        <button type="button" id="demo-back" class="btn">Back</button>
+        <button type="button" id="demo-next" class="btn btn-primary">Next</button>
+      </div>
+    </div>
+  </div>
 
   <script src="/vendor/cytoscape.min.js"></script>
   <script src="/app.js"></script>

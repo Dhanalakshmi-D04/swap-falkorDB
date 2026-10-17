@@ -87,6 +87,33 @@ CREATE_ALTRUIST_FLOW_EDGES = (
     "CREATE (d)-[:F {cap: 1}]->(pt) RETURN count(*)"
 )
 
+#: The loader statements, named, so `GET /cypher` can show them next to the tool queries.
+CYPHER: dict[str, str] = {
+    "loader_index_pair": INDEX_STATEMENTS[0],
+    "loader_index_donor": INDEX_STATEMENTS[1],
+    "loader_index_patient": INDEX_STATEMENTS[2],
+    "loader_pairs": CREATE_PAIRS,
+    "loader_pair_edges": CREATE_PAIR_EDGES,
+    "loader_source": CREATE_SOURCE_NODE,
+    "loader_sink": CREATE_SINK_NODE,
+    "loader_donor_nodes": CREATE_DONOR_NODES,
+    "loader_patient_nodes": CREATE_PATIENT_NODES,
+    "loader_source_edges": CREATE_SOURCE_EDGES,
+    "loader_flow_edges": CREATE_FLOW_EDGES,
+    "loader_sink_edges": CREATE_SINK_EDGES,
+    "loader_altruist": CREATE_ALTRUIST,
+    "loader_altruist_edges": CREATE_ALTRUIST_EDGES,
+    "loader_altruist_donor": CREATE_ALTRUIST_DONOR,
+    "loader_altruist_source_edge": CREATE_ALTRUIST_SOURCE_EDGE,
+    "loader_altruist_flow_edges": CREATE_ALTRUIST_FLOW_EDGES,
+    "loader_read_pairs": READ_PAIRS,
+    "loader_read_pair_edges": READ_PAIR_EDGES,
+    "loader_read_pair": READ_PAIR,
+    "loader_count_pairs": COUNT_PAIRS,
+    "loader_count_pair_edges": COUNT_PAIR_EDGES,
+    "loader_count_flow_edges": COUNT_FLOW_EDGES,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class LoadStats:

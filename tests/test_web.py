@@ -1,13 +1,30 @@
-"""M9 web UI tests: the single page and its one vendored asset are served, without ever touching
-FalkorDB (static file serving needs no graph)."""
+"""M9 web UI tests: the single page, its one vendored asset and its wiring are served.
+
+Static file serving and the `/cypher` catalogue need no graph, so these run without FalkorDB.
+The last test cross-checks the DOM: every element id `app.js` reaches for must exist in
+`index.html`, so a rename in the markup cannot silently break the page.
+"""
 
 from __future__ import annotations
+
+import re
 
 from fastapi.testclient import TestClient
 
 from swap.api import WEB_DIR, app
 
 client = TestClient(app)
+
+INDEX = WEB_DIR / "index.html"
+APP_JS = WEB_DIR / "app.js"
+
+#: The section anchors the sticky navigation points at, and the panels the page promises.
+SECTION_IDS = ("topnav", "main", "hero", "how", "result", "swaps", "leftout", "whatif", "hood")
+
+#: `$("id")` reaches for an element; `$$("...")` is a selector, so it is deliberately excluded.
+_DOLLAR_ID = re.compile(r'(?<!\$)\$\("([^"]+)"\)')
+_ID_ATTR = re.compile(r'id="([^"]+)"')
+_ID_SHAPE = re.compile(r"^[A-Za-z][\w-]*$")
 
 
 def test_index_page_is_served() -> None:
@@ -19,6 +36,12 @@ def test_index_page_is_served() -> None:
     assert "/app.js" in body
     assert "/vendor/cytoscape.min.js" in body
     assert 'id="ask-agent"' in body and 'id="q"' in body
+
+
+def test_key_section_ids_are_present() -> None:
+    body = client.get("/").text
+    for section in SECTION_IDS:
+        assert f'id="{section}"' in body, f"missing section id {section!r}"
 
 
 def test_static_assets_are_served() -> None:
@@ -38,3 +61,34 @@ def test_vendored_cytoscape_is_served_and_non_empty() -> None:
 
 def test_vendor_holds_only_cytoscape() -> None:
     assert sorted(p.name for p in (WEB_DIR / "vendor").iterdir()) == ["cytoscape.min.js"]
+
+
+def test_index_has_no_external_urls() -> None:
+    """No CDN, no web fonts: everything the page loads is served from this repo."""
+    body = INDEX.read_text(encoding="utf-8")
+    assert "http://" not in body
+    assert "https://" not in body
+    assert '="//' not in body
+    assert "@import" not in body
+
+
+def test_cypher_endpoint_lists_the_queries() -> None:
+    response = client.get("/cypher")
+    assert response.status_code == 200
+    queries = response.json()["queries"]
+    assert isinstance(queries, dict) and queries
+    assert "find_cycles_3" in queries  # a tool query
+    assert "loader_pairs" in queries  # a loader query
+    assert all(isinstance(name, str) and isinstance(query, str) for name, query in queries.items())
+
+
+def test_every_element_id_used_by_app_js_exists_in_index() -> None:
+    referenced = {
+        match for match in _DOLLAR_ID.findall(APP_JS.read_text(encoding="utf-8"))
+        if _ID_SHAPE.match(match)
+    }
+    defined = set(_ID_ATTR.findall(INDEX.read_text(encoding="utf-8")))
+
+    assert len(referenced) > 20, "expected app.js to reference many element ids"
+    missing = sorted(referenced - defined)
+    assert not missing, f"app.js references ids absent from index.html: {missing}"
