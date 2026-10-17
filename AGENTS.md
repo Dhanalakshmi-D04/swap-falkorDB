@@ -9,7 +9,7 @@ Read first: docs/EVIDENCE.md (verified facts, expected numbers, FalkorDB gotchas
 2. The LLM never writes Cypher. All Cypher is human-written in the tool layer, parameterised. Entity ids are resolved against the graph first.
 3. Every tool answer carries its path/evidence and a trace; an empty traversal means "the graph does not know", never "safe".
 4. Do not claim anything the repo does not reproduce. Honest limits are a feature (synthetic data, known result, external integer-program solver, max-flow bound allows chains).
-5. Disclose AI assistance: append to AI_USE.md at each milestone; use the commit trailer below.
+5. Disclose AI assistance: append to AI_USE.md at each milestone.
 
 ## Approval boundaries (inherited from the user's global rules)
 Run ordinary project work without asking: tests, builds, linting, formatting, code generation, edits inside this repo, running the local FalkorDB container.
