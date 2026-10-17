@@ -18,6 +18,16 @@ DEFAULT_ACTIVE_GRAPH = os.environ.get("SWAP_ACTIVE_GRAPH", "").strip() or "pool"
 LLM_BASE_URL_ENV = "LLM_BASE_URL"
 LLM_API_KEY_ENV = "LLM_API_KEY"
 LLM_MODEL_ENV = "LLM_MODEL"
+LLM_PROVIDER_ENV = "LLM_PROVIDER"
+LLM_API_VERSION_ENV = "LLM_API_VERSION"
+#: The same settings under the names a shared `.env` may already use (`LLM_*` wins when both are set).
+LLM_FALLBACK_ENV = {
+    LLM_BASE_URL_ENV: "VISION_ENDPOINT",
+    LLM_API_KEY_ENV: "VISION_API_KEY",
+    LLM_MODEL_ENV: "VISION_MODEL",
+    LLM_PROVIDER_ENV: "VISION_PROVIDER",
+    LLM_API_VERSION_ENV: "VISION_API_VERSION",
+}
 
 _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
@@ -38,6 +48,8 @@ class LLMSettings:
     base_url: str = ""
     api_key: str = ""
     model: str = ""
+    provider: str = ""
+    api_version: str = ""
 
     def configured(self) -> bool:
         return bool(self.base_url and self.api_key and self.model)
@@ -66,10 +78,19 @@ def settings(env_file: str | Path | None = None) -> Settings:
 
 
 def llm_settings(env_file: str | Path | None = None) -> LLMSettings:
-    """Read the optional LLM endpoint from the environment; all three vars must be non-empty."""
+    """Read the optional LLM endpoint from the environment; url, key and model must be non-empty.
+
+    `LLM_*` names win; the `VISION_*` names are accepted when the `LLM_*` one is unset.
+    """
     load_env(env_file)
+
+    def read(name: str) -> str:
+        return (os.environ.get(name, "") or os.environ.get(LLM_FALLBACK_ENV[name], "")).strip()
+
     return LLMSettings(
-        base_url=os.environ.get(LLM_BASE_URL_ENV, "").strip(),
-        api_key=os.environ.get(LLM_API_KEY_ENV, "").strip(),
-        model=os.environ.get(LLM_MODEL_ENV, "").strip(),
+        base_url=read(LLM_BASE_URL_ENV),
+        api_key=read(LLM_API_KEY_ENV),
+        model=read(LLM_MODEL_ENV),
+        provider=read(LLM_PROVIDER_ENV).lower(),
+        api_version=read(LLM_API_VERSION_ENV),
     )

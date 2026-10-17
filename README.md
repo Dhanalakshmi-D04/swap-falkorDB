@@ -163,7 +163,7 @@ Every product answer walks the graph on the request path; the Python/networkx or
 `run_agent(question)` returns `{answer, tool_calls, rejected_ids, mode}`.
 - **LLM mode** (`mode:"llm"`): configured by `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`. The model only chooses a tool from the catalogue and fills typed arguments; tool results are the envelopes, fed back verbatim.
 - **Tool mode** (`mode:"tool"`): with no LLM configured, a deterministic keyword router answers ("cycle", "who can be matched", "explain pair N", "what if", "bound", "optimum"). This always works and is the demo's fallback.
-- **Sentence check**: after the final answer is produced, pair ids named in it (`pair 17`, `#17`, ids in lists) are collected and any id that appears in **no tool result of the run** is rejected — the answer is withheld with the offending ids listed in `rejected_ids`.
+- **Sentence check**: after the final answer is produced, pair ids named in it (`pair 17`, `#17`, ids in lists) are collected and any id that appears in **no tool result of the run** (and was not typed in your question) is rejected — the answer is withheld with the offending ids listed in `rejected_ids`.
 
 ## Run it
 Prerequisites: Python 3.12+ and Docker.

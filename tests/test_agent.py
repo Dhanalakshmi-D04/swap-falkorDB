@@ -11,6 +11,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from swap.agent import (
     TOOL_ORDER,
     ToolCatalogue,
@@ -298,3 +300,134 @@ def test_check_ids_flags_only_unknown_ids() -> None:
     assert check_ids("pair 0 and pair 1 are matched", known) == []
     assert check_ids("pair 7 can donate", known) == [7]
     assert check_ids("pair 0 and pair 9", known) == [9]
+
+
+# --- model wiring: env names, Azure endpoints and reasoning models ---------------------------
+
+_LLM_ENV = (
+    "LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "LLM_PROVIDER", "LLM_API_VERSION",
+    "VISION_ENDPOINT", "VISION_API_KEY", "VISION_MODEL", "VISION_PROVIDER", "VISION_API_VERSION",
+)
+
+
+def _clean_env(monkeypatch, tmp_path, **values):
+    from swap.config import llm_settings
+
+    for name in _LLM_ENV:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    return llm_settings(env_file=tmp_path / "absent.env")
+
+
+def test_vision_names_are_accepted_when_llm_names_are_unset(monkeypatch, tmp_path) -> None:
+    cfg = _clean_env(
+        monkeypatch, tmp_path,
+        VISION_ENDPOINT="https://res.openai.azure.com/openai/v1/chat/completions",
+        VISION_API_KEY="k", VISION_MODEL="m", VISION_PROVIDER="Azure",
+    )
+    assert cfg.configured()
+    assert (cfg.api_key, cfg.model, cfg.provider) == ("k", "m", "azure")
+
+
+def test_llm_names_win_over_vision_names(monkeypatch, tmp_path) -> None:
+    cfg = _clean_env(
+        monkeypatch, tmp_path,
+        LLM_BASE_URL="https://a.example/v1", LLM_API_KEY="a", LLM_MODEL="a-model",
+        VISION_ENDPOINT="https://b.example/v1", VISION_API_KEY="b", VISION_MODEL="b-model",
+    )
+    assert (cfg.base_url, cfg.api_key, cfg.model) == ("https://a.example/v1", "a", "a-model")
+
+
+def test_nothing_set_means_tool_mode(monkeypatch, tmp_path) -> None:
+    assert not _clean_env(monkeypatch, tmp_path).configured()
+
+
+def test_a_pasted_full_route_is_trimmed_to_the_api_root() -> None:
+    from swap.agent import _api_root
+
+    assert _api_root("https://r.openai.azure.com/openai/v1/chat/completions") == "https://r.openai.azure.com/openai/v1"
+    assert _api_root("https://r.openai.azure.com/openai/v1/responses/") == "https://r.openai.azure.com/openai/v1"
+    assert _api_root("https://api.example.com/v1") == "https://api.example.com/v1"
+
+
+def test_azure_endpoints_pick_the_right_client() -> None:
+    from swap.agent import _build_client
+
+    v1 = _build_client(LLMSettings(base_url="https://r.openai.azure.com/openai/v1/chat/completions", api_key="k", model="m"))
+    assert type(v1).__name__ == "OpenAI" and str(v1.base_url).rstrip("/") == "https://r.openai.azure.com/openai/v1"
+
+    classic = _build_client(LLMSettings(
+        base_url="https://r.openai.azure.com/openai/deployments/m/chat/completions?api-version=2025-01-01-preview",
+        api_key="k", model="m",
+    ))
+    assert type(classic).__name__ == "AzureOpenAI"
+
+    plain = _build_client(LLMSettings(base_url="https://api.example.com/v1", api_key="k", model="m"))
+    assert type(plain).__name__ == "OpenAI"
+
+
+def test_a_model_that_refuses_tools_with_reasoning_is_retried_once_with_it_off() -> None:
+    from swap.agent import _complete
+
+    class Picky:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+            self.chat = self
+            self.completions = self
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            if "reasoning_effort" not in kwargs:
+                raise RuntimeError("Function tools with reasoning_effort are not supported ... set reasoning_effort to 'none'")
+            return "ok"
+
+    client, extra = Picky(), {}
+    assert _complete(client, extra, model="m", messages=[]) == "ok"
+    assert extra == {"reasoning_effort": "none"} and len(client.calls) == 2
+    _complete(client, extra, model="m", messages=[])  # remembered: no second failed attempt
+    assert len(client.calls) == 3
+
+
+def test_unrelated_model_errors_are_not_swallowed() -> None:
+    from swap.agent import _complete
+
+    class Broken:
+        def __init__(self) -> None:
+            self.chat = self
+            self.completions = self
+
+        def create(self, **kwargs):
+            raise RuntimeError("rate limited")
+
+    with pytest.raises(RuntimeError, match="rate limited"):
+        _complete(Broken(), {}, model="m", messages=[])
+
+
+def test_an_id_the_user_typed_may_be_repeated_but_an_invented_one_may_not() -> None:
+    unknown = {
+        "outcome": "unknown_entity",
+        "result": {"message": "Pair 99999 is not in the graph", "entity": {"kind": "Pair", "id": 99999}},
+        "path": [],
+        "trace": {"tool": "explain_unmatched", "args": {}, "ms": 0.1, "rows": 0},
+    }
+
+    class Unknown(FakeTools):
+        def explain_unmatched(self, pair_id: int) -> dict[str, Any]:
+            return unknown
+
+    script = lambda: FakeClient([
+        tool_call("explain_unmatched", '{"pair_id": 99999}'),
+        final("Pair 99999 is not in the graph, so it cannot be matched."),
+    ])
+    asked = run_agent("Why wasn't pair 99999 matched?", catalogue=ToolCatalogue(Unknown()), client=script(), llm=LLMSettings(model="fake"))
+    assert asked["rejected_ids"] == [] and "99999" in asked["answer"]
+
+    # the same answer to a question that never mentioned that id (and a result that does not
+    # carry it) is an invented id and is still withheld
+    class Silent(FakeTools):
+        def explain_unmatched(self, pair_id: int) -> dict[str, Any]:
+            return _env("explain_unmatched", {"pair": {"id": 0}}, [[0, 1]])
+
+    invented = run_agent("Tell me about pair 0.", catalogue=ToolCatalogue(Silent()), client=script(), llm=LLMSettings(model="fake"))
+    assert invented["rejected_ids"] == [99999]

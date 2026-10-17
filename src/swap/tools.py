@@ -165,6 +165,10 @@ PLAN_NOTICE = (
 DECISIONS = {"approve": "approved", "reject": "rejected"}
 
 
+class SolverError(RuntimeError):
+    """The packing solver gave up (time limit) with swaps on the table: not the same as "no swap"."""
+
+
 class PlanStateError(ValueError):
     """A plan decision that is not allowed from the plan's current status (the API answers 409)."""
 
@@ -358,6 +362,11 @@ class SwapTools:
             at_most_one_groups=groups,
         )
         timer.stop(found["trace"]["rows"] + len(chains) + 1)
+        if not pack.chosen and not pack.success and (cycles or chains):
+            raise SolverError(
+                f"the solver could not finish ({pack.status}) with {len(cycles)} candidate swaps; "
+                "try a shorter swap length or a smaller pool"
+            )
 
         chosen_cycles = [c for i, c in zip(pack.indices, pack.chosen, strict=True) if i < len(cycles)]
         chosen_chains = [c for i, c in zip(pack.indices, pack.chosen, strict=True) if i >= len(cycles)]
@@ -382,6 +391,11 @@ class SwapTools:
             },
         }
         trace = build_trace("best_set", args, timer)
+        if pack.chosen and not pack.success:
+            result["note"] = (
+                "the solver stopped at its time limit: this is the best set it found, "
+                "not proven to be the best possible"
+            )
         if not pack.chosen:
             result["note"] = f"{EMPTY_NOTE} vertex-disjoint swap cycle in this graph"
             return envelope(Outcome.NOT_IN_GRAPH, result, (), trace=trace)

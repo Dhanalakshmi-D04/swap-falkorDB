@@ -7,7 +7,8 @@ Tool results are the four-outcome envelopes, fed back verbatim.
 
 After the model's final answer is produced, a sentence check scans it for pair ids (`pair 17`,
 `#17`, ids in lists) and rejects the answer if it names an id that appears in no tool result of
-the run - so an id the graph never returned cannot reach the coordinator.
+the run (ids the user typed in the question do not count as invented) - so an id the graph never
+returned cannot reach the coordinator.
 
 If no LLM endpoint is configured (`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL` empty) the agent falls
 back to a deterministic keyword router, "tool mode", which answers the same questions without a
@@ -44,7 +45,9 @@ SYSTEM_PROMPT = (
     "only the tools provided. Never write Cypher or invent graph facts. Choose one tool, fill its "
     "typed arguments, and read the returned envelope. Mention a pair id only when a tool result "
     "of this run contains it. The max-flow bound is an upper bound that also allows chains, not "
-    "the cycle optimum. Synthetic patients only; this is decision support, not medical advice."
+    "the cycle optimum. Never call a patient safe or unsafe and never give medical or clinical "
+    "judgments: report only what the tools returned. Synthetic patients only; this is decision "
+    "support, not medical advice."
 )
 
 REJECTION = (
@@ -211,6 +214,9 @@ def _known_ids(env: dict[str, Any]) -> set[int]:
     pair = result.get("pair")
     if isinstance(pair, dict) and isinstance(pair.get("id"), int):
         ids.add(pair["id"])
+    entity = result.get("entity")  # an id the graph was asked about and does not hold
+    if isinstance(entity, dict) and isinstance(entity.get("id"), int):
+        ids.add(entity["id"])
     return ids
 
 
@@ -289,10 +295,57 @@ def _run_tool(catalogue: ToolCatalogue, name: str, args: dict[str, Any]) -> dict
         return _error_envelope(name, args, exc)
 
 
-def _build_client(cfg: LLMSettings) -> Any:
-    from openai import OpenAI
+DEFAULT_AZURE_API_VERSION = "2024-10-21"
 
-    return OpenAI(base_url=cfg.base_url, api_key=cfg.api_key)
+
+def _api_root(url: str) -> str:
+    """The API root for an OpenAI client: a pasted full route (`.../chat/completions`) is trimmed."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    path = parts.path.rstrip("/")
+    for suffix in ("/chat/completions", "/responses"):
+        path = path.removesuffix(suffix)
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
+
+
+def _build_client(cfg: LLMSettings) -> Any:
+    """An OpenAI client, or an Azure OpenAI client when the endpoint is an Azure resource.
+
+    The `/openai/v1` route of an Azure resource speaks the plain OpenAI protocol; any other Azure
+    endpoint (including a pasted "target URI" with a deployment path) needs the Azure client, which
+    takes the resource root and an api-version.
+    """
+    from urllib.parse import parse_qs, urlsplit
+
+    from openai import AzureOpenAI, OpenAI
+
+    parts = urlsplit(cfg.base_url)
+    is_azure = cfg.provider.startswith("azure") or "azure" in parts.netloc.lower()
+    if is_azure and "/openai/v1" not in parts.path:
+        version = (
+            cfg.api_version
+            or (parse_qs(parts.query).get("api-version") or [""])[0]
+            or DEFAULT_AZURE_API_VERSION
+        )
+        return AzureOpenAI(
+            azure_endpoint=f"{parts.scheme}://{parts.netloc}",
+            api_key=cfg.api_key,
+            api_version=version,
+        )
+    return OpenAI(base_url=_api_root(cfg.base_url), api_key=cfg.api_key)
+
+
+def _complete(client: Any, extra: dict[str, Any], **kwargs: Any) -> Any:
+    """One chat completion. Some reasoning models refuse tools unless `reasoning_effort` is "none";
+    when the server says so, switch it off once and remember that for the rest of the run."""
+    try:
+        return client.chat.completions.create(**kwargs, **extra)
+    except Exception as exc:
+        if "reasoning_effort" not in str(exc) or "reasoning_effort" in extra:
+            raise
+        extra["reasoning_effort"] = "none"
+        return client.chat.completions.create(**kwargs, **extra)
 
 
 def _run_llm(
@@ -307,13 +360,14 @@ def _run_llm(
         {"role": "user", "content": question},
     ]
     schemas = tool_schemas(catalogue)
+    extra: dict[str, Any] = {}
     calls: list[dict[str, Any]] = []
-    known: set[int] = set()
+    known: set[int] = set(extract_pair_ids(question))  # an id you typed is not an invented id
     answer = ""
 
     for _ in range(max_steps):
-        response = client.chat.completions.create(
-            model=model, messages=messages, tools=schemas, tool_choice="auto"
+        response = _complete(
+            client, extra, model=model, messages=messages, tools=schemas, tool_choice="auto"
         )
         message = response.choices[0].message
         tool_calls = getattr(message, "tool_calls", None)
@@ -458,7 +512,7 @@ def summarize(name: str, env: dict[str, Any]) -> str:
 def run_tool_mode(question: str, catalogue: ToolCatalogue) -> dict[str, Any]:
     """Answer without a model: route by keyword, run the tools, summarize their envelopes."""
     calls: list[dict[str, Any]] = []
-    known: set[int] = set()
+    known: set[int] = set(extract_pair_ids(question))
     sentences: list[str] = []
     for name, args in route(question):
         env = _run_tool(catalogue, name, args)

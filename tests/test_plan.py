@@ -189,3 +189,37 @@ def test_the_mcp_server_can_draft_but_has_no_way_to_decide() -> None:
     exposed = asyncio.run(names())
     assert {"draft_plan", "get_plan", "list_plans"} <= exposed
     assert not any("decide" in name or "approve" in name for name in exposed)
+
+
+def test_a_solver_that_gives_up_is_an_error_not_an_empty_answer(
+    tools: SwapTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import swap.tools as tools_module
+    from swap.solve import PackResult
+    from swap.tools import SolverError
+
+    monkeypatch.setattr(
+        tools_module, "pack_cycles", lambda *a, **k: PackResult([], 0, 0.0, "time limit", False)
+    )
+    with pytest.raises(SolverError, match="could not finish"):
+        tools.best_set(3)
+    with pytest.raises(SolverError):
+        tools.draft_plan(3)
+    assert tools.list_plans()["outcome"] == Outcome.NOT_IN_GRAPH.value  # nothing half-written
+
+
+def test_a_set_found_before_the_time_limit_is_labelled_as_unproven(
+    tools: SwapTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import swap.tools as tools_module
+    from swap.solve import PackResult
+
+    real = tools_module.pack_cycles
+
+    def unproven(*args, **kwargs):
+        done = real(*args, **kwargs)
+        return PackResult(done.chosen, done.covered, done.objective, "time limit", False, done.indices)
+
+    monkeypatch.setattr(tools_module, "pack_cycles", unproven)
+    result = tools.best_set(3)["result"]
+    assert result["cycles"] and "not proven" in result["note"]

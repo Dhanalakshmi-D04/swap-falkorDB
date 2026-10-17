@@ -16,8 +16,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -29,7 +29,7 @@ from swap.graph import CYPHER as LOADER_CYPHER
 from swap.graph import connect, graph_counts, load_pool, pool_from_graph
 from swap.plan import render_packet_markdown
 from swap.tools import CYPHER as TOOL_CYPHER
-from swap.tools import PlanStateError, SwapTools
+from swap.tools import PlanStateError, SolverError, SwapTools
 
 ACTIVE_GRAPH = DEFAULT_ACTIVE_GRAPH
 TRACE_LIMIT = 200
@@ -82,6 +82,12 @@ app = FastAPI(
 )
 
 _traces: deque[dict[str, Any]] = deque(maxlen=TRACE_LIMIT)
+
+
+@app.exception_handler(SolverError)
+async def solver_gave_up(_: Request, exc: SolverError) -> JSONResponse:
+    """A solver that ran out of time is a 503, never an empty "no swap" answer."""
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 def _tools() -> SwapTools:

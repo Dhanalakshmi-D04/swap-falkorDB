@@ -112,6 +112,7 @@ const postJson = (body) => ({
 function friendlyStatus(status) {
   if (status === 404) return "That was not found. The pool may have changed, so try building one again.";
   if (status === 422) return "That input was not valid. Check the value and try again.";
+  if (status === 503) return "That took too long to work out. Try a shorter swap length or a smaller pool.";
   if (status >= 500) return "The server had a problem with that request. Is the graph database (FalkorDB) running?";
   return `The request failed (error ${status}). Please try again.`;
 }
