@@ -2,7 +2,7 @@
 
 **An agent that runs a kidney-swap exchange inside a graph: FalkorDB holds every possible swap, guards every plan, reacts when a lab test fails, and explains every patient who is left out.**
 
-Graph Hacks 2026 (WeMakeDevs × FalkorDB) · Track 1: Agents That Act on Connected Data · **Live demo:** http://54.90.155.247/ · **Demo video:** _TODO — the human adds the link before submission._
+Graph Hacks 2026 (WeMakeDevs × FalkorDB) · Track 1: Agents That Act on Connected Data · **Live demo:** https://swap.dhanalakshmi.tech/ · **Demo video:** _TODO — the human adds the link before submission._
 
 > **What this is not:** not medical advice, not a clinical tool, not trained on or connected to any real patient data. Every patient in this repository is synthetic. It illustrates decision support for a transplant coordinator, nothing more.
 

@@ -21,8 +21,9 @@ services:
       FALKORDB_HOST: falkordb
       FALKORDB_PORT: "6379"
     ports:
-      # Host side configurable via APP_PORT (default 80); container always listens on 8000.
-      - "${APP_PORT:-80}:8000"
+      # Host side configurable via APP_PORT (default 8080, 80/443 are held by the `caddy` profile);
+      # container always listens on 8000.
+      - "${APP_PORT:-8080}:8000"
     depends_on:
       falkordb:
         condition: service_healthy
@@ -38,5 +39,24 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  # TLS front door (server only): docker compose --profile tls up -d
+  # Caddy gets/renews a Let's Encrypt certificate for the host in ./Caddyfile via HTTP-01.
+  caddy:
+    image: caddy:2
+    profiles: ["tls"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   falkordb-data:
+  caddy-data:
+  caddy-config:
