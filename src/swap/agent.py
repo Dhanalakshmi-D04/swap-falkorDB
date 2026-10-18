@@ -50,7 +50,8 @@ SYSTEM_PROMPT = (
     "of this run contains it. The max-flow bound is an upper bound that also allows chains, not "
     "the cycle optimum. Never call a patient safe or unsafe and never give medical or clinical "
     "judgments: report only what the tools returned. Synthetic patients only; this is decision "
-    "support, not medical advice."
+    "support, not medical advice. Reply in plain sentences without Markdown: the answer is shown as "
+    "plain text, so no asterisks, backticks or bullet syntax."
 )
 
 REJECTION = (
